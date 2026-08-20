@@ -339,6 +339,14 @@ function parseListField(value) {
   return String(value).replace(/[[\]{}]/g, '').split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
 }
 
+// Normalize a frontmatter list field to a display string (block lists parse to
+// string[]; inline lists to a bracketed string). team_roles presents them as
+// strings.
+function stringifyList(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).join(', ')
+  return String(value === undefined ? '' : value).replace(/[[\]{}]/g, '').trim()
+}
+
 // Map one role frontmatter tool name to the DSH tool names that ACTUALLY exist
 // in the parent agent's visible view (global + ancestor/preset layers — the
 // child inherits exactly this surface). Existence is decided by the live view,
@@ -767,10 +775,10 @@ function apply(ctx, config) {
             name: parsed.meta.name || '',
             provider: parsed.meta.provider || '',
             model: parsed.meta.model || '',
-            tools: parsed.meta.tools || '',
-            disallowedTools: parsed.meta.disallowedTools || parsed.meta.disallowed_tools || '',
-            skills: parsed.meta.skills || '',
-            mcp_servers: parsed.meta.mcp_servers || parsed.meta.mcpServers || '',
+            tools: stringifyList(parsed.meta.tools),
+            disallowedTools: stringifyList(parsed.meta.disallowedTools ?? parsed.meta.disallowed_tools),
+            skills: stringifyList(parsed.meta.skills),
+            mcp_servers: stringifyList(parsed.meta.mcp_servers ?? parsed.meta.mcpServers),
             description: parsed.meta.description || ''
           })
         }

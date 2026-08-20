@@ -1,0 +1,19 @@
+# Dependencies / build artifacts
+node_modules/
+dist/
+*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# DSH local state (never commit secrets or profile state)
+*.local.yml
+.env
+.env.*

@@ -1,0 +1,32 @@
+{
+  "name": "team-delegate",
+  "version": "1.0.0",
+  "description": "Role-directed team delegation for DSH. Reads $DSH_HOME/agents/<subagent_type>.md and spawns typed subagents (team_delegate / team_roles / team_find) with model-route selection and per-role tool/skill field controls.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "files": [
+    "lib",
+    "index.js"
+  ],
+  "keywords": [
+    "dsh",
+    "cordis",
+    "agent",
+    "team",
+    "delegate",
+    "subagent",
+    "role",
+    "routing"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

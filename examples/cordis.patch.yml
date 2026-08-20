@@ -1,0 +1,18 @@
+# Example: append these rows to your profile's cordis.patch.yml to mount
+# both plugins. The two packages MUST be installed together (see README).
+# After copying packages/ into $DSH_HOME/profiles/node_modules/, restart DSH.
+
+# Host-level skills permission guard for role-directed team delegation
+# (reads $DSH_HOME/agents/*.md `skills:` and hard-denies `skill` calls at
+# host scope for registered role children). Package: dsh-role-guard.
+- insert:
+    - id: dsh-role-guard
+      name: dsh-role-guard
+
+# team_delegate / team_roles / team_find resident in EVERY session (host-global
+# registration). Package: team-delegate (roles in $DSH_HOME/agents/*.md).
+# Children inherit these like the builtin subagent tool (nested delegation is
+# depth-bounded; a role's `tools:` whitelist filters them out for that child).
+- insert:
+    - id: team-delegate
+      name: team-delegate

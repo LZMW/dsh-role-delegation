@@ -84,9 +84,22 @@ DSH 的宿主插件放在 profile 的 `node_modules` 里，通过 `cordis.patch.
          name: team-delegate
    ```
 
-3. **重启 DSH**，然后用 `team_roles` 验证：应能列出 `$DSH_HOME/agents/` 下的角色文件。
+3. **重启 DSH**，然后用 `team_roles` 验证：应能列出角色文件。
 
 > 两个插件**必须同时安装**：只装 `team-delegate` 时权限守卫不生效（仅提示词层过滤）；只装 `dsh-role-guard` 时没有委托工具。
+
+### 多 profile（web + tui）都支持
+
+DSH 是 **multi-profile** 启动器：`web`（浏览器 GUI）和 `tui`（终端界面）是两个**独立进程**、各自独立的 Cordis 组合，各自读自己的 `cordis.patch.yml`。要让两个界面都用上，**每个 profile 都要挂载这两个插件**：
+
+```powershell
+# $DSH_HOME/profiles/web/cordis.patch.yml       ← web 界面
+# $DSH_HOME/profiles/<你的-tui-profile>/cordis.patch.yml  ← tui 界面
+```
+
+两个 patch 文件内容相同（上文第 2 步的 insert 块）。**插件包只需放一份**在 `$DSH_HOME/profiles/node_modules/`（所有 profile 共享的 flat fallback 层，Node 父目录查找会自动找到），无需每个 profile 单独安装。验证：`dsh --profile <name> --dump-config`，在输出末尾的 `cordis.patch.yml` 段应能看到 `dsh-role-guard` 和 `team-delegate` 两行。
+
+注意：tui 需要真实交互终端（TTY）才能启动；用 `--dump-config` 验证组合树不依赖 TTY。
 
 ## 角色文件
 

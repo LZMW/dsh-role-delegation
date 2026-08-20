@@ -1,10 +1,11 @@
-# Example: append these rows to your profile's cordis.patch.yml to mount
-# both plugins. The two packages MUST be installed together (see README).
-# After copying packages/ into $DSH_HOME/profiles/node_modules/, restart DSH.
+# Example: append these rows to a profile's cordis.patch.yml to mount both
+# plugins — repeat for EVERY profile you use (web, tui, ...). The two packages
+# MUST be installed together (see README). After copying packages/ into
+# $DSH_HOME/profiles/node_modules/ (shared flat fallback), restart DSH.
 
 # Host-level role permission guard for role-directed team delegation (四类全管).
-# Reads $DSH_HOME/agents/*.md frontmatter and hard-denies out-of-scope calls at
-# host scope for registered role children:
+# Reads role frontmatter and hard-denies out-of-scope calls at host scope for
+# registered role children:
 #   disallowedTools — tool blacklist (deny-first)
 #   tools           — exhaustive tool whitelist
 #   mcp_servers     — MCP prefix control (mcp__<server>__*)
@@ -15,7 +16,8 @@
       name: dsh-role-guard
 
 # team_delegate / team_roles / team_find resident in EVERY session (host-global
-# registration). Package: team-delegate (roles in $DSH_HOME/agents/*.md).
+# registration). Package: team-delegate (roles in <projectRoot>/.dsh/agents or
+# $DSH_HOME/agents/*.md).
 # Children inherit these like the builtin subagent tool (nested delegation is
 # depth-bounded; a role's `tools:` whitelist filters them out for that child).
 - insert:

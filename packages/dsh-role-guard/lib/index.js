@@ -3,8 +3,12 @@
 // profile's `cordis.patch.yml`. It:
 //
 //   1. publishes a `roleGuard` host service so team_delegate can announce each
-//      spawned child (`childId -> roleName`) — the only coupling is that small
-//      announce; this plugin owns the permission table and the enforcement.
+//      spawned child (`childId -> roleName`, plus the resolved role file path)
+//      — the only coupling is that small announce; this plugin owns the
+//      permission table and the enforcement. When team-delegate passes the
+//      absolute role path, the guard reads that exact file (project-local
+//      <root>/.dsh/agents roles work); without it, it falls back to its own
+//      rolesDir resolution.
 //   2. enforces the role frontmatter fields at HOST level through the
 //      `tools/pre-execute` waterfall. Because it listens on the host root
 //      scope, it covers every session, every preset, foreground AND background
@@ -30,7 +34,7 @@
 // hard-denied with a clear message.
 
 import z from '@deepseek-ai/schemastery'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -119,10 +123,21 @@ function apply(ctx, config) {
   // childId (string) -> { role, restricted, allowTools, denyTools, mcpServers, skillsDeclared, skills }
   const registered = new Map()
 
+  // The absolute role file that won resolution, or undefined when team-delegate
+  // did not announce one (then rolesDir + <role>.md is used as the fallback).
+  async function readRoleRaw(roleName, rolePath) {
+    if (rolePath && typeof rolePath === 'string' && rolePath.length > 0) {
+      const info = await stat(rolePath).catch(() => undefined)
+      if (info && info.isFile()) return await readFile(rolePath, 'utf8')
+      return undefined
+    }
+    return await readFile(join(rolesDir, roleName + '.md'), 'utf8').catch(() => undefined)
+  }
+
   // Read the role's frontmatter fresh on every announce, so edits are picked up
   // on the next delegation (no startup parse to go stale). Fast (<1ms) and only
   // runs once per delegation.
-  async function announce(childId, roleName) {
+  async function announce(childId, roleName, rolePath) {
     const key = String(childId)
     const role = String(roleName)
     const info = {
@@ -136,19 +151,21 @@ function apply(ctx, config) {
     }
     if (ROLE_NAME.test(role)) {
       try {
-        const raw = await readFile(join(rolesDir, role + '.md'), 'utf8')
-        const meta = parseRole(raw).meta
-        const allowRaw = parseListField(meta.tools)
-        const denyRaw = parseListField(meta.disallowedTools)
-        const servers = parseListField(meta.mcp_servers)
-        if (allowRaw.length > 0) info.allowTools = new Set(allowRaw.flatMap(normalizeToolName))
-        for (const n of denyRaw.flatMap(normalizeToolName)) info.denyTools.add(n)
-        if (servers.length > 0) info.mcpServers = servers.map((s) => String(s).toLowerCase())
-        if (meta.skills !== undefined) {
-          info.skillsDeclared = true
-          info.skills = parseListField(meta.skills)
+        const raw = await readRoleRaw(role, rolePath)
+        if (raw !== undefined) {
+          const meta = parseRole(raw).meta
+          const allowRaw = parseListField(meta.tools)
+          const denyRaw = parseListField(meta.disallowedTools)
+          const servers = parseListField(meta.mcp_servers)
+          if (allowRaw.length > 0) info.allowTools = new Set(allowRaw.flatMap(normalizeToolName))
+          for (const n of denyRaw.flatMap(normalizeToolName)) info.denyTools.add(n)
+          if (servers.length > 0) info.mcpServers = servers.map((s) => String(s).toLowerCase())
+          if (meta.skills !== undefined) {
+            info.skillsDeclared = true
+            info.skills = parseListField(meta.skills)
+          }
+          info.restricted = info.allowTools !== null || info.denyTools.size > 0 || info.mcpServers !== null || info.skillsDeclared
         }
-        info.restricted = info.allowTools !== null || info.denyTools.size > 0 || info.mcpServers !== null || info.skillsDeclared
       } catch {
         // missing/unreadable role file: record the role with no restriction
       }
@@ -167,7 +184,7 @@ function apply(ctx, config) {
   }
 
   ctx.provide('roleGuard', {
-    register(childId, roleName) { return announce(childId, roleName) },
+    register(childId, roleName, rolePath) { return announce(childId, roleName, rolePath) },
     unregister(childId) { registered.delete(String(childId)) },
     list() {
       const out = []

@@ -1,7 +1,14 @@
 // team-delegate: role-directed team delegation for DSH.
 //
-// Reads role definitions from $DSH_HOME/agents/<subagent_type>.md and starts a
-// spawn subagent whose system prompt (persona) is the role body.
+// Role discovery (ordered roots, first match wins):
+//   1. config.rolesDir               (explicit admin root, single root if set)
+//   2. <projectRoot>/.dsh/agents     (project-local, resolved from the calling
+//                                     agent's cwd walking up to a .git, same
+//                                     mechanism DSH uses for project skills)
+//   3. $DSH_HOME/agents              (user-global)
+// Each <subagent_type>.md body becomes the spawned subagent's system prompt
+// (persona). The same root resolution is mirrored by dsh-role-guard so the
+// guard enforces the exact winning role file.
 //
 // Model-route selection (priority, "usable and non-blocking"):
 //   1. role frontmatter `provider` + `model`   (explicit per-role choice)
@@ -20,8 +27,8 @@
 
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { join, resolve } from 'node:path'
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
+import { access, readFile, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 
 const name = 'team-delegate'
@@ -77,12 +84,53 @@ const Config = z.object({
   }).default(undefined)
 })
 
-function resolveRolesDir(config) {
-  if (config && typeof config.rolesDir === 'string' && config.rolesDir.length > 0) {
-    return resolve(config.rolesDir)
+// The parent agent's absolute working directory (SessionHeader.cwd), if any.
+function agentCwd(agent) {
+  try {
+    const header = agent && agent.session ? agent.session.header : undefined
+    return header && typeof header.cwd === 'string' && header.cwd.length > 0 ? header.cwd : undefined
+  } catch {
+    return undefined
   }
-  const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
-  return join(dshHome, 'agents')
+}
+
+async function pathExists(path) {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Mirror DSH skill discovery: the project root is the nearest ancestor of cwd
+// that contains a .git directory, falling back to cwd itself.
+async function findProjectRoot(cwd) {
+  let current = cwd
+  for (;;) {
+    if (await pathExists(join(current, '.git'))) return current
+    const parent = dirname(current)
+    if (parent === current) return cwd
+    current = parent
+  }
+}
+
+// Ordered role roots, highest priority first. An explicit config.rolesDir wins
+// as the single root (backward compatible); otherwise project-local
+// <projectRoot>/.dsh/agents precedes the global $DSH_HOME/agents — the same
+// precedence DSH uses for project vs user skills.
+async function roleRoots(config, agent) {
+  if (config && typeof config.rolesDir === 'string' && config.rolesDir.length > 0) {
+    return [resolve(config.rolesDir)]
+  }
+  const roots = []
+  const cwd = agentCwd(agent)
+  if (cwd) {
+    const projectRoot = await findProjectRoot(cwd)
+    roots.push(join(projectRoot, '.dsh', 'agents'))
+  }
+  roots.push(join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'agents'))
+  return roots
 }
 
 function findClosingFrontmatter(text, start) {
@@ -314,7 +362,6 @@ function buildRoleControls(role, ctx) {
 }
 
 function apply(ctx, config) {
-  const rolesDir = resolveRolesDir(config)
   const configAO = (config && config.defaultAgentOptions && typeof config.defaultAgentOptions.provider === 'string' && config.defaultAgentOptions.provider.length > 0 && typeof config.defaultAgentOptions.model === 'string' && config.defaultAgentOptions.model.length > 0)
     ? { provider: config.defaultAgentOptions.provider, model: config.defaultAgentOptions.model }
     : undefined
@@ -335,33 +382,41 @@ function apply(ctx, config) {
     return FALLBACK_AGENT_OPTIONS
   }
 
-  const rolePathFor = (roleName) => rolesDir + '/' + roleName + (roleName.toLowerCase().endsWith('.md') ? '' : '.md')
+  const roleFileName = (roleName) => roleName + (roleName.toLowerCase().endsWith('.md') ? '' : '.md')
 
-  async function readRole(roleName) {
+  // First match wins across the ordered roots (config > project > global).
+  async function readRole(roleName, parent) {
     if (!ROLE_NAME.test(roleName)) throw new Error('invalid subagent_type "' + roleName + '": use lowercase letters, digits and hyphens')
-    const path = rolePathFor(roleName)
-    const info = await stat(path).catch(() => undefined)
-    if (!info || !info.isFile()) return undefined
-    return parseRole(await readFile(path, 'utf8'))
+    const fileName = roleFileName(roleName)
+    for (const root of await roleRoots(config, parent)) {
+      const path = join(root, fileName)
+      const info = await stat(path).catch(() => undefined)
+      if (info && info.isFile()) {
+        return { ...parseRole(await readFile(path, 'utf8')), path }
+      }
+    }
+    return undefined
   }
 
   // Announce a spawned child to the host-level role guard (dsh-role-guard), so
   // the role frontmatter `skills:` restriction is enforced at host scope for
   // this child — foreground AND background, every preset. No-op when the guard
   // is not mounted yet (e.g. before restart): team_delegate stays fully usable.
-  function announceRole(childId, roleName) {
+  // The resolved absolute role path is passed so the guard reads the exact file
+  // that won (config/project/global resolution stays consistent across the pair).
+  function announceRole(childId, roleName, rolePath) {
     if (childId === undefined || childId === null || !roleName) return
     try {
       const roleGuard = ctx.get('roleGuard')
       if (roleGuard && typeof roleGuard.register === 'function') {
-        Promise.resolve(roleGuard.register(String(childId), String(roleName))).catch(() => {})
+        Promise.resolve(roleGuard.register(String(childId), String(roleName), rolePath)).catch(() => {})
       }
     } catch {}
   }
 
-  async function runOne(request, signal, skillAllow, roleName) {
+  async function runOne(request, signal, skillAllow, roleName, rolePath) {
     const run = await ctx.subagents.start('spawn', Object.assign({}, request, { signal }))
-    announceRole(run.id, roleName)
+    announceRole(run.id, roleName, rolePath)
     let result
     let dump = ''
     try {
@@ -392,9 +447,9 @@ function apply(ctx, config) {
 
   const delegateTool = defineTool({
     name: 'team_delegate',
-    description: '委托给一个类型化团队成员子代理。每个角色在 $DSH_HOME/agents/<subagent_type>.md 中预定义；插件把该文件正文作为子代理的系统提示词（persona）注入，prompt 参数只放任务本身。角色 frontmatter 支持字段级控制：provider/model（模型路由）、tools（工具白名单，硬限制）、disallowedTools（工具黑名单，硬限制）、mcp_servers（MCP 服务器限定）、skills（技能限定）。未声明路由时自动回退到主代理当前实际使用的提供商/模型。先用 team_roles 查看可用角色，或用 team_find 按任务匹配角色。后台默认开启：返回 durable subagentId，可用 send_message 继续；设 run_in_background: false 则阻塞等待结果。',
+    description: '委托给一个类型化团队成员子代理。每个角色在 <项目根>/.dsh/agents/ 或 $DSH_HOME/agents/<subagent_type>.md 中预定义（项目级优先于全局，从主代理工作目录向上定位项目根）；插件把该文件正文作为子代理的系统提示词（persona）注入，prompt 参数只放任务本身。角色 frontmatter 支持字段级控制：provider/model（模型路由）、tools（工具白名单，硬限制）、disallowedTools（工具黑名单，硬限制）、mcp_servers（MCP 服务器限定）、skills（技能限定）。未声明路由时自动回退到主代理当前实际使用的提供商/模型。先用 team_roles 查看可用角色，或用 team_find 按任务匹配角色。后台默认开启：返回 durable subagentId，可用 send_message 继续；设 run_in_background: false 则阻塞等待结果。',
     parameters: {
-      subagent_type: { type: 'string', required: true, description: '角色键：$DSH_HOME/agents 下 md 文件名（不带扩展名），如 data-cleaner-analyst' },
+      subagent_type: { type: 'string', required: true, description: '角色键：<项目根>/.dsh/agents 或 $DSH_HOME/agents 下的 md 文件名（不带扩展名），如 data-cleaner-analyst' },
       description: { type: 'string', required: true, description: '简短任务描述（3-5 词，展示用）' },
       prompt: { type: 'string', required: true, description: '交给该角色的任务指令。角色设定与控制已作为系统提示词注入，这里写任务本身与产出要求' },
       run_in_background: { type: 'boolean', description: '默认 true：后台运行返回 subagentId；false：阻塞等待结果' }
@@ -425,9 +480,9 @@ function apply(ctx, config) {
     async execute(args, exec) {
       const parent = exec.agent
       if (!parent) throw new Error('team_delegate requires a calling agent (exec.agent was undefined)')
-      const role = await readRole(args.subagent_type)
+      const role = await readRole(args.subagent_type, parent)
       if (!role) {
-        return { kind: 'not-found', message: 'no file at ' + rolePathFor(args.subagent_type) + ' — run team_roles to list available roles' }
+        return { kind: 'not-found', message: 'no role file for "' + args.subagent_type + '" in ' + (await roleRoots(config, parent)).join(' or ') + ' — run team_roles to list available roles' }
       }
       const task = String(args.prompt || '')
       const body = role.body
@@ -444,12 +499,12 @@ function apply(ctx, config) {
       if (controls.toolFilter) request.toolFilter = controls.toolFilter
 
       if (args.run_in_background === false) {
-        let { result, dump } = await runOne(request, exec.signal, controls.skills, args.subagent_type)
+        let { result, dump } = await runOne(request, exec.signal, controls.skills, args.subagent_type, role.path)
         let routeUsed = agentOptions
         const pr = parentRoute(parent)
         if (looksLikeAuth(result, dump) && pr && !sameRoute(pr, agentOptions)) {
           const retry = Object.assign({}, request, { agentOptions: pr })
-          const r2 = await runOne(retry, exec.signal, controls.skills, args.subagent_type)
+          const r2 = await runOne(retry, exec.signal, controls.skills, args.subagent_type, role.path)
           result = r2.result
           dump = r2.dump
           routeUsed = pr
@@ -468,14 +523,14 @@ function apply(ctx, config) {
         request,
         signal: exec.signal
       })
-      announceRole(started.childId, args.subagent_type)
+      announceRole(started.childId, args.subagent_type, role.path)
       return { kind: 'continuable', subagentId: String(started.childId), warnings: controls.warnings }
     }
   })
 
   const rolesTool = defineTool({
     name: 'team_roles',
-    description: '列出 $DSH_HOME/agents 下所有可用的团队成员角色（subagent_type、provider/model、描述与字段级控制）。调用 team_delegate 前先运行它以确认可用的角色名。',
+    description: '列出所有可用的团队成员角色（subagent_type、provider/model、描述与字段级控制）：从 <项目根>/.dsh/agents 与 $DSH_HOME/agents 汇总（项目级优先），同名字只出现一次。调用 team_delegate 前先运行它以确认可用的角色名。',
     parameters: {},
     output: {
       schema: {
@@ -513,36 +568,42 @@ function apply(ctx, config) {
           if (r.mcp_servers) controls.push('mcp:' + r.mcp_servers)
           return '- ' + r.subagent_type + route + (r.name ? ' (' + r.name + ')' : '') + (controls.length ? ' ⚙{' + controls.join(' | ') + '}' : '') + (r.description ? ': ' + r.description : '')
         })
-        return [{ type: 'text', text: lines.length ? 'Available team roles:\n' + lines.join('\n') : 'No role files found under ' + rolesDir + ' — create <subagent_type>.md files there.' }]
+        return [{ type: 'text', text: lines.length ? 'Available team roles:\n' + lines.join('\n') : 'No role files found under <projectRoot>/.dsh/agents or $DSH_HOME/agents — create <subagent_type>.md files there.' }]
       }
     },
     isConcurrencySafe: () => true,
-    async execute() {
-      let entries
-      try {
-        entries = await readdir(rolesDir, { withFileTypes: true })
-      } catch {
-        return { roles: [] }
-      }
+    async execute(args, exec) {
+      const roots = await roleRoots(config, exec && exec.agent)
       const roles = []
-      for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue
-        const subagent_type = entry.name.slice(0, -3)
-        let parsed = { body: '', meta: {} }
+      const seen = new Set()
+      for (const root of roots) {
+        let entries
         try {
-          parsed = parseRole(await readFile(join(rolesDir, entry.name), 'utf8'))
-        } catch {}
-        roles.push({
-          subagent_type,
-          name: parsed.meta.name || '',
-          provider: parsed.meta.provider || '',
-          model: parsed.meta.model || '',
-          tools: parsed.meta.tools || '',
-          disallowedTools: parsed.meta.disallowedTools || parsed.meta.disallowed_tools || '',
-          skills: parsed.meta.skills || '',
-          mcp_servers: parsed.meta.mcp_servers || parsed.meta.mcpServers || '',
-          description: parsed.meta.description || ''
-        })
+          entries = await readdir(root, { withFileTypes: true })
+        } catch {
+          continue
+        }
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue
+          const subagent_type = entry.name.slice(0, -3)
+          if (seen.has(subagent_type)) continue
+          seen.add(subagent_type)
+          let parsed = { body: '', meta: {} }
+          try {
+            parsed = parseRole(await readFile(join(root, entry.name), 'utf8'))
+          } catch {}
+          roles.push({
+            subagent_type,
+            name: parsed.meta.name || '',
+            provider: parsed.meta.provider || '',
+            model: parsed.meta.model || '',
+            tools: parsed.meta.tools || '',
+            disallowedTools: parsed.meta.disallowedTools || parsed.meta.disallowed_tools || '',
+            skills: parsed.meta.skills || '',
+            mcp_servers: parsed.meta.mcp_servers || parsed.meta.mcpServers || '',
+            description: parsed.meta.description || ''
+          })
+        }
       }
       roles.sort((a, b) => a.subagent_type.localeCompare(b.subagent_type))
       return { roles }
@@ -586,30 +647,36 @@ function apply(ctx, config) {
       }
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const limit = (args.limit && Number.isFinite(args.limit) && args.limit > 0) ? Math.min(Math.floor(args.limit), 10) : 3
       const taskCounts = tokenize(args.task || '')
-      let entries
-      try {
-        entries = await readdir(rolesDir, { withFileTypes: true })
-      } catch {
-        return { matches: [] }
-      }
+      const roots = await roleRoots(config, exec && exec.agent)
       const matches = []
-      for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue
-        const subagent_type = entry.name.slice(0, -3)
-        let parsed = { body: '', meta: {} }
+      const seen = new Set()
+      for (const root of roots) {
+        let entries
         try {
-          parsed = parseRole(await readFile(join(rolesDir, entry.name), 'utf8'))
+          entries = await readdir(root, { withFileTypes: true })
         } catch {
           continue
         }
-        const desc = parsed.meta.description || ''
-        const name = parsed.meta.name || ''
-        const hay = [desc, name, subagent_type].filter(Boolean).join(' ')
-        const score = scoreTask(taskCounts, tokenize(hay))
-        matches.push({ subagent_type, name, score, description: desc })
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue
+          const subagent_type = entry.name.slice(0, -3)
+          if (seen.has(subagent_type)) continue
+          seen.add(subagent_type)
+          let parsed = { body: '', meta: {} }
+          try {
+            parsed = parseRole(await readFile(join(root, entry.name), 'utf8'))
+          } catch {
+            continue
+          }
+          const desc = parsed.meta.description || ''
+          const name = parsed.meta.name || ''
+          const hay = [desc, name, subagent_type].filter(Boolean).join(' ')
+          const score = scoreTask(taskCounts, tokenize(hay))
+          matches.push({ subagent_type, name, score, description: desc })
+        }
       }
       matches.sort((a, b) => b.score - a.score)
       return { matches: matches.slice(0, limit) }

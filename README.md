@@ -39,6 +39,7 @@
   - `disallowedTools` — 工具黑名单（拒绝优先）
   - `mcp_servers` — MCP 服务器限定（`mcp__<server>__*` 前缀）
   - `skills` — 技能白名单（空列表 = 禁用全部技能；`[a,b]` = 只允许 a、b）
+  - **四类全管**：`disallowedTools`（黑名单）、`tools`（白名单）、`mcp_servers`（MCP 前缀）、`skills`（技能）四类按顺序逐条检查，详见 [dsh-role-guard 管控范围](packages/dsh-role-guard#管控范围四类全管)
 - **全套团队工具**：`team_delegate`（委托）、`team_roles`（列出角色）、`team_find`（按任务匹配角色）。
 - **后台/前台双模式**：默认后台启动返回 durable `subagentId`，可用 `send_message` 继续；`run_in_background: false` 则阻塞等待结果。
 
@@ -89,7 +90,15 @@ DSH 的宿主插件放在 profile 的 `node_modules` 里，通过 `cordis.patch.
 
 ## 角色文件
 
-角色定义放在 `$DSH_HOME/agents/<subagent_type>.md`，文件名（不含扩展名）就是 `team_delegate` 的 `subagent_type` 参数，**须为小写字母/数字/连字符**。frontmatter 的正文就是注入给子代理的系统提示词（persona）。
+角色定义放在 `<项目根>/.dsh/agents/<subagent_type>.md` 或 `$DSH_HOME/agents/<subagent_type>.md`，文件名（不含扩展名）就是 `team_delegate` 的 `subagent_type` 参数，**须为小写字母/数字/连字符**。frontmatter 的正文就是注入给子代理的系统提示词（persona）。
+
+**角色解析优先级**（与 DSH 的 skill 机制一致，多根扫描、首个命中生效）：
+
+1. `config.rolesDir`（显式配置，设置后为唯一根，向后兼容）
+2. `<项目根>/.dsh/agents`（项目级，从主代理工作目录向上找 `.git` 定位项目根；无 `.git` 则以工作目录为项目根）
+3. `$DSH_HOME/agents`（用户全局）
+
+同名角色**项目级覆盖全局**（如 `team_roles` 只列出一次）。`team-delegate` 会把解析到的角色文件绝对路径传给 `dsh-role-guard`，守卫读取**同一个文件**，两处解析永不打架。
 
 ```markdown
 ---

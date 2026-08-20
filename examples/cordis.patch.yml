@@ -2,9 +2,14 @@
 # both plugins. The two packages MUST be installed together (see README).
 # After copying packages/ into $DSH_HOME/profiles/node_modules/, restart DSH.
 
-# Host-level skills permission guard for role-directed team delegation
-# (reads $DSH_HOME/agents/*.md `skills:` and hard-denies `skill` calls at
-# host scope for registered role children). Package: dsh-role-guard.
+# Host-level role permission guard for role-directed team delegation (四类全管).
+# Reads $DSH_HOME/agents/*.md frontmatter and hard-denies out-of-scope calls at
+# host scope for registered role children:
+#   disallowedTools — tool blacklist (deny-first)
+#   tools           — exhaustive tool whitelist
+#   mcp_servers     — MCP prefix control (mcp__<server>__*)
+#   skills          — skill whitelist (last dimension; must also pass `tools`)
+# Package: dsh-role-guard.
 - insert:
     - id: dsh-role-guard
       name: dsh-role-guard

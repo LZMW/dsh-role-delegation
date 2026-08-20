@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+### 修复
+
+- **后台冷恢复守卫注册表丢失（审查"冷恢复断链"）**：此前 guard 的注册表是纯内存态，DSH 重启后后台 continuable 子代理的 persona/toolFilter 会从会话 descriptor 冷恢复，但守卫的 skill/mcp/黑名单强制全丢（不对称）。现在 `childId → {role, rolePath}` 映射持久化到 `$DSH_HOME/agents/.role-guard.registry.json`，启动时加载，并在 `agent/session-start`（`source: 'resume'/'startup'`）时对恢复的子代理重新 announce——权限在恢复时从角色文件**重读**，spawn 到 resume 之间的角色编辑也会被拾取。已离线验证完整流程（register→重启→resume→权限恢复）。
+
 ## 1.2.0
 
 第三方审查（静态对照 + 解析器实测）后的一轮修复：
@@ -26,4 +32,3 @@
 ### 已知取舍（有意为之，非 bug）
 
 - 守卫在角色文件缺失/不可读时按"无限制"注册（fail-open）——保证"缺 guard/缺文件不阻塞委托"。
-- 后台子代理的守卫注册表是内存态，进程重启后丢失（后台冷恢复的子代理失去 guard 强制，仅剩 `restrict()` 层）。

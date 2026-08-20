@@ -32,17 +32,29 @@
 // Limitation (by design): a role child may still SEE other tools/skills in its
 // catalog (no per-agent catalog filter), but calling a non-whitelisted one is
 // hard-denied with a clear message.
+//
+// Cold-resume persistence: the in-memory `registered` table is per-process, so
+// a background (continuable) child that survives a DSH restart would lose its
+// guard restrictions (its persona/toolFilter persist in the session descriptor,
+// but the guard table does not). To keep the pair symmetric across restarts,
+// the childId -> {role, rolePath} mapping is persisted to a small JSON file and
+// re-applied when a resumed agent emits `agent/session-start` with source
+// 'resume'. Permissions are re-read from the role file at resume time, so role
+// edits between spawn and resume are picked up.
 
 import z from '@deepseek-ai/schemastery'
-import { readFile, stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 
 const name = 'dsh-role-guard'
 const inject = []
 
 const Config = z.object({
-  rolesDir: z.string().default('')
+  rolesDir: z.string().default(''),
+  // Path to the cold-resume registry (childId -> {role, rolePath}). Relative
+  // paths resolve against $DSH_HOME. Default: $DSH_HOME/agents/.role-guard.registry.json
+  registryFile: z.string().default('')
 })
 
 const ROLE_NAME = /^[a-z0-9-]+$/
@@ -85,6 +97,49 @@ function resolveRolesDir(config) {
   }
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   return join(dshHome, 'agents')
+}
+
+function resolveRegistryFile(config) {
+  if (config && typeof config.registryFile === 'string' && config.registryFile.length > 0) {
+    return resolve(config.registryFile)
+  }
+  const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+  return join(dshHome, 'agents', '.role-guard.registry.json')
+}
+
+// ── cold-resume registry persistence ──────────────────────────────────────
+// Persists only childId -> {role, rolePath} (NOT parsed permissions). On
+// resume the role file is re-read, so permission edits between spawn and
+// resume are honored. I/O is fire-and-forget (a failed write never breaks a
+// delegation); the in-memory table stays the source of truth for the gate.
+async function loadRegistry(file) {
+  try {
+    const raw = await readFile(file, 'utf8')
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+async function saveRegistry(file, entries) {
+  try {
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(file, JSON.stringify(entries, null, 2), 'utf8')
+  } catch {
+    // never fail a delegation on a registry write
+  }
+}
+
+// Turn the in-memory registry into a plain JSON map (childId -> {role, rolePath}).
+function registrySnapshot(registered) {
+  const out = {}
+  for (const [id, info] of registered) {
+    if (info && typeof info.role === 'string' && info.role.length > 0) {
+      out[id] = { role: info.role, rolePath: info.rolePath }
+    }
+  }
+  return out
 }
 
 // Same minimal frontmatter dialect as team-delegate/lib/index.js (mirrored
@@ -177,8 +232,52 @@ function parseListField(value) {
 
 function apply(ctx, config) {
   const rolesDir = resolveRolesDir(config)
-  // childId (string) -> { role, restricted, allowTools, denyTools, mcpServers, skillsDeclared, skills }
+  const registryFile = resolveRegistryFile(config)
+  // childId (string) -> { role, rolePath, restricted, allowTools, denyTools, mcpServers, skillsDeclared, skills }
   const registered = new Map()
+
+  // Cold-resume: re-announce children that were registered before a restart.
+  // On startup the registry file holds childId -> {role, rolePath} for every
+  // not-yet-unregistered child. We do NOT parse permissions here (roles may
+  // have changed while down); we only remember the mapping, and re-announce
+  // lazily when the resumed agent emits agent/session-start (source 'resume').
+  const persisted = new Map() // childId -> { role, rolePath }
+  const pendingResume = new Set() // childIds seen as resumed this process run
+
+  async function persistEntry(childId, info) {
+    persisted.set(String(childId), { role: info.role, rolePath: info.rolePath })
+    await saveRegistry(registryFile, Object.fromEntries(persisted))
+  }
+  async function persistRemove(childId) {
+    persisted.delete(String(childId))
+    await saveRegistry(registryFile, Object.fromEntries(persisted))
+  }
+
+  // Restore the persisted mapping at startup (permissions re-read on resume).
+  ;(async () => {
+    const loaded = await loadRegistry(registryFile)
+    for (const [id, entry] of Object.entries(loaded)) {
+      if (entry && typeof entry.role === 'string' && ROLE_NAME.test(entry.role)) {
+        persisted.set(id, { role: entry.role, rolePath: typeof entry.rolePath === 'string' ? entry.rolePath : undefined })
+      }
+    }
+  })()
+
+  // When a background child is resumed after a restart, re-announce it so its
+  // guard restrictions come back (its persona/toolFilter persisted in the
+  // session descriptor; the guard table must too). Source 'resume' is the cold
+  // restore path; 'startup' covers children restored at boot.
+  ctx.on('agent/session-start', (payload) => {
+    const agent = payload && payload.agent
+    const source = payload && payload.source
+    if (!agent || (source !== 'resume' && source !== 'startup')) return
+    const id = String(agent.id)
+    if (pendingResume.has(id)) return
+    pendingResume.add(id)
+    const entry = persisted.get(id)
+    if (!entry) return
+    announce(id, entry.role, entry.rolePath).catch(() => {})
+  })
 
   // The absolute role file that won resolution, or undefined when team-delegate
   // did not announce one (then rolesDir + <role>.md is used as the fallback).
@@ -199,6 +298,7 @@ function apply(ctx, config) {
     const role = String(roleName)
     const info = {
       role,
+      rolePath,
       restricted: false,
       allowTools: null,
       denyTools: new Set(),
@@ -228,6 +328,7 @@ function apply(ctx, config) {
       }
     }
     registered.set(key, info)
+    persistEntry(key, info)
     return {
       ok: true,
       role,
@@ -242,7 +343,10 @@ function apply(ctx, config) {
 
   ctx.provide('roleGuard', {
     register(childId, roleName, rolePath) { return announce(childId, roleName, rolePath) },
-    unregister(childId) { registered.delete(String(childId)) },
+    unregister(childId) {
+      registered.delete(String(childId))
+      persistRemove(String(childId))
+    },
     list() {
       const out = []
       for (const [id, info] of registered) {

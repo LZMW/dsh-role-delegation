@@ -21,7 +21,7 @@ skills: [a]          -> 只允许加载技能 a
 
 ## 管控范围（四类全管）
 
-`dsh-role-guard` 管**四类字段**，在 `tools/pre-execute` 瀑布上按顺序逐条检查，全部通过才放行（拦截逻辑见 `lib/index.js` 192–241 行）：
+`dsh-role-guard` 管**四类字段**，在 `tools/pre-execute` 瀑布上按顺序逐条检查，全部通过才放行（`report` 机制工具无条件豁免，见下文）：
 
 | # | 字段 | 管什么 | 语义 |
 |---|---|---|---|
@@ -51,7 +51,23 @@ if (name === 'skill' && info.skillsDeclared) {
 
 ## 为什么需要它（与 toolFilter 的分工）
 
-`team-delegate` 的 `toolFilter` 是**提示词层面**的软限制（影响子代理"看到"哪些工具）；本插件是**运行时**的硬限制（子代理一旦尝试调用越权工具就被拒绝并收到明确原因）。它挂在宿主作用域，因此覆盖**所有会话、所有预设、前台和后台子代理**——即使有工具在 spawn 之后才注册，也逃不过这道闸。
+`team-delegate` 的 `toolFilter`（内部 `tools.restrict()`）是**注册表层**的硬执行——子代理调不到白名单外工具（`UNKNOWN_TOOL`），限制持续整个生命周期。但 `restrict()` 有它够不到的增量，正是本插件补上的：
+
+1. **skill 参数级白名单**：`restrict()` 只能整体禁/放 `skill` 工具；本插件能检查 `skill` 的 `arguments.name`，做到"只允许加载技能 A"。
+2. **MCP 服务器前缀动态准入**：`restrict()` 是 spawn 时快照；本插件每次调用按 `mcp__<server>__*` 实时判定。
+3. **`disallowedTools` 黑名单优先序**：deny 先于任何 allow 判定。
+4. **跨作用域兜底**：宿主根作用域覆盖所有会话/预设/前台/后台子代理（含 spawn 后才注册的工具）。
+
+**机制工具豁免**：continuable 子代理被系统提示词要求用 `report` 工具汇报结果（它属于子代理自身层，DSH 的 `restrict()` 对此豁免）。本插件同样豁免 `report`——白名单/黑名单都不会破坏子代理的汇报通道。
+
+> 💡 **frontmatter 支持 YAML 块状列表和行内注释**（与 `team-delegate` 相同的解析方言）：
+> ```yaml
+> tools:
+>   - read
+>   - write
+> disallowedTools:
+>   - web_search   # 行内注释正确剥离
+> ```
 
 ## 设计说明
 

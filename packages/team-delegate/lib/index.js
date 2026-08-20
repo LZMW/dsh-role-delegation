@@ -145,6 +145,71 @@ function findClosingFrontmatter(text, start) {
   return -1
 }
 
+// Strip an unquoted, outside-bracket YAML inline comment (` # ...`), so
+// `tools: [read, write] # 白名单` yields only the list. A `#` inside quotes or
+// brackets is data. Returns the cleaned line (trimmed).
+function stripInlineComment(line) {
+  let depth = 0
+  let quote = ''
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (quote) {
+      if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue }
+    if (ch === '[' || ch === '{') { depth++; continue }
+    if (ch === ']' || ch === '}') { depth = Math.max(0, depth - 1); continue }
+    if (ch === '#' && depth === 0) return line.slice(0, i).trim()
+  }
+  return line.trim()
+}
+
+// Parse role frontmatter as a small YAML subset. Besides plain `key: value`
+// lines it supports YAML block lists (`key:` followed by indented `- item`
+// lines) and inline comments. A list field yields a string[] (or '' when the
+// key is present with no value); scalar fields yield strings.
+function parseFrontmatterMeta(frontmatter) {
+  const lines = frontmatter.split('\n')
+  const meta = {}
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripInlineComment(lines[i])
+    if (!line || line === '---') continue
+    const m = /^([A-Za-z0-9_-]+):(?:\s*(.*))?$/.exec(line)
+    if (!m) continue
+    const key = m[1]
+    let value = (m[2] === undefined ? '' : m[2]).replace(/^['"]|['"]$/g, '').trim()
+    // Block list: the key line has no inline value and the following lines are
+    // `- item` entries indented deeper than the key. Indentation is measured on
+    // the RAW line (stripInlineComment trims, which would erase it).
+    if (value === '') {
+      const indent = /^[ \t]*/.exec(lines[i])[0].length
+      const items = []
+      let j = i + 1
+      for (; j < lines.length; j++) {
+        const rawNext = lines[j]
+        const rawIndent = /^[ \t]*/.exec(rawNext)[0].length
+        const next = stripInlineComment(rawNext)
+        if (!next) continue
+        if (next.startsWith('-')) {
+          if (rawIndent <= indent) break
+          items.push(next.replace(/^[ \t]*-\s*/, '').replace(/^['"]|['"]$/g, '').trim())
+          continue
+        }
+        if (/^[ \t]*[A-Za-z0-9_-]+:/.test(next) && rawIndent <= indent) break
+        break
+      }
+      if (items.length > 0) {
+        meta[key] = items
+        i = j - 1
+        continue
+      }
+    }
+    meta[key] = value
+  }
+  return meta
+}
+
 function parseRole(raw) {
   const text = String(raw)
   const firstNL = text.indexOf('\n')
@@ -155,12 +220,7 @@ function parseRole(raw) {
   if (closing < 0) return { body: text.trim(), meta: {} }
   const frontmatter = text.slice(firstNL + 1, closing)
   const body = text.slice(closing + 3).replace(/^\r?\n/, '').trim()
-  const meta = {}
-  for (const line of frontmatter.split('\n')) {
-    const m = /^\s*([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line)
-    if (m) meta[m[1]] = m[2].replace(/^['"]|['"]$/g, '').trim()
-  }
-  return { body, meta }
+  return { body, meta: parseFrontmatterMeta(frontmatter) }
 }
 
 function stopReasonError(result) {
@@ -273,17 +333,29 @@ function parseListField(value) {
   return String(value).replace(/[[\]{}]/g, '').split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
 }
 
-function mapToolName(rawName, ctx) {
+// Map one role frontmatter tool name to the DSH tool names that ACTUALLY exist
+// in the parent agent's visible view (global + ancestor/preset layers — the
+// child inherits exactly this surface). Existence is decided by the live view,
+// not a static set: a static whitelist both drops preset-level tools that are
+// real but not in the global layer, and keeps names that do not exist on this
+// platform (which would make tools.restrict() throw). `parent` may be absent
+// (non-agent callers) — then only globally visible tools are accepted.
+function mapToolName(rawName, ctx, parent, parentVisible) {
   const key = rawName.toLowerCase().replace(/[\s_-]/g, '')
   const candidates = Object.prototype.hasOwnProperty.call(TOOL_NAME_MAP, key) ? TOOL_NAME_MAP[key] : [rawName]
-  return candidates.filter((c) => {
-    if (KNOWN_DSH_TOOLS.has(c)) return true
-    if (typeof c === 'string' && c.startsWith('mcp__')) return true
+  const visible = parentVisible || (() => {
     try {
-      return ctx.tools.get(c) !== undefined
+      const set = new Set()
+      for (const s of ctx.tools.schemas(parent)) if (s && s.name) set.add(s.name)
+      return set
     } catch {
-      return false
+      return null
     }
+  })()
+  return candidates.filter((c) => {
+    if (typeof c === 'string' && c.startsWith('mcp__')) return true
+    if (visible === null) return KNOWN_DSH_TOOLS.has(c)
+    return visible.has(c)
   })
 }
 
@@ -291,22 +363,43 @@ function mapToolName(rawName, ctx) {
 // `skills:` empty -> deny the `skill` tool (the child sees no skills at all).
 // `skills: [a,b]` -> keep the `skill` tool but a per-child guard (installed in
 // runOne) hard-denies calls for names outside the whitelist with a clear reason.
-function buildRoleControls(role, ctx) {
+function buildRoleControls(role, ctx, parent) {
   const meta = role && role.meta ? role.meta : {}
   const allowInput = parseListField(meta.tools)
-  const denyInput = parseListField(meta.disallowedTools)
-  const servers = parseListField(meta.mcp_servers)
+  const denyInput = parseListField(meta.disallowedTools ?? meta.disallowed_tools)
+  const servers = parseListField(meta.mcp_servers ?? meta.mcpServers)
   const skills = parseListField(meta.skills)
   const warnings = []
   const allow = []
   const deny = []
 
-  // Enumerate registered MCP tools for server expansion.
+  // Enumerate registered MCP tools for server expansion (parent view too, so a
+  // preset-mounted MCP server is seen; fall back to the global view).
   let mcpTools = []
   try {
-    const schemas = ctx.tools.schemas() || []
+    const schemas = ctx.tools.schemas(parent) || ctx.tools.schemas() || []
     mcpTools = schemas.map((s) => s && s.name).filter((n) => typeof n === 'string' && n.startsWith('mcp__'))
-  } catch {}
+  } catch {
+    try {
+      const schemas = ctx.tools.schemas() || []
+      mcpTools = schemas.map((s) => s && s.name).filter((n) => typeof n === 'string' && n.startsWith('mcp__'))
+    } catch {}
+  }
+
+  // Parent-visible tool set used for existence checks (shared across mapToolName
+  // calls so we query schemas once per delegation).
+  let parentVisible = null
+  try {
+    const set = new Set()
+    for (const s of ctx.tools.schemas(parent)) if (s && s.name) set.add(s.name)
+    parentVisible = set
+  } catch {
+    try {
+      const set = new Set()
+      for (const s of ctx.tools.schemas()) if (s && s.name) set.add(s.name)
+      parentVisible = set
+    } catch {}
+  }
 
   const serverTools = new Set()
   for (const sv of servers) {
@@ -322,12 +415,12 @@ function buildRoleControls(role, ctx) {
   }
 
   for (const n of allowInput) {
-    const v = mapToolName(n, ctx)
+    const v = mapToolName(n, ctx, parent, parentVisible)
     if (v.length === 0) warnings.push('tool "' + n + '" unknown/unavailable in DSH (ignored)')
     else allow.push(...v)
   }
   for (const n of denyInput) {
-    const v = mapToolName(n, ctx)
+    const v = mapToolName(n, ctx, parent, parentVisible)
     if (v.length === 0) warnings.push('disallowed tool "' + n + '" unknown/unavailable in DSH (ignored)')
     else deny.push(...v)
   }
@@ -414,8 +507,35 @@ function apply(ctx, config) {
     } catch {}
   }
 
+  // The unknown-tool error tools.restrict() throws when an allow/deny entry
+  // names a tool absent from the child's restrictable view. Even with live-view
+  // existence checks a race (tool registered between check and spawn, or a
+  // child-only tool) can trip it; degrade by dropping the toolFilter instead of
+  // failing the whole delegation.
+  function looksLikeRestrictError(error) {
+    const msg = String(error && error.message ? error.message : error)
+    return /tools\.restrict|unknown global tool|restrict.*unknown|names unknown/i.test(msg)
+  }
+
   async function runOne(request, signal, skillAllow, roleName, rolePath) {
-    const run = await ctx.subagents.start('spawn', Object.assign({}, request, { signal }))
+    let run
+    let droppedFilter = false
+    try {
+      run = await ctx.subagents.start('spawn', Object.assign({}, request, { signal }))
+    } catch (error) {
+      if (request.toolFilter && looksLikeRestrictError(error)) {
+        const withoutFilter = Object.assign({}, request)
+        delete withoutFilter.toolFilter
+        try {
+          run = await ctx.subagents.start('spawn', Object.assign({}, withoutFilter, { signal }))
+          droppedFilter = true
+        } catch (error2) {
+          throw error2
+        }
+      } else {
+        throw error
+      }
+    }
     announceRole(run.id, roleName, rolePath)
     let result
     let dump = ''
@@ -437,12 +557,27 @@ function apply(ctx, config) {
           }
         } catch {}
       }
-      result = await run.result
+      try {
+        result = await run.result
+      } catch (error) {
+        // A rejected run promise is an infrastructure-level failure (not a model
+        // stop reason). Normalize it so the caller's structured error path (and
+        // the auth-retry above) still runs instead of throwing past it.
+        result = {
+          stopReason: 'error',
+          output: [{ type: 'text', text: 'subagent run rejected: ' + String(error && error.message ? error.message : error) }]
+        }
+      }
       dump = dumpChildEvents(run.localAgent, 4000)
     } finally {
       await run.dispose()
+      // Free the guard table entry for this one-shot child — it is gone now.
+      try {
+        const roleGuard = ctx.get('roleGuard')
+        if (roleGuard && typeof roleGuard.unregister === 'function') roleGuard.unregister(String(run.id))
+      } catch {}
     }
-    return { result, dump }
+    return { result, dump, droppedFilter }
   }
 
   const delegateTool = defineTool({
@@ -488,7 +623,7 @@ function apply(ctx, config) {
       const body = role.body
       const hasTemplate = body.includes('{{') || body.includes('}}')
       const agentOptions = resolveAgentOptions(role, parent)
-      const controls = buildRoleControls(role, ctx)
+      const controls = buildRoleControls(role, ctx, parent)
       const request = {
         label: args.description || args.subagent_type,
         prompt: hasTemplate ? [{ type: 'text', text: body + '\n\n--- 任务 ---\n\n' + task + controls.skillsPrompt }] : [{ type: 'text', text: task + controls.skillsPrompt }],
@@ -499,7 +634,7 @@ function apply(ctx, config) {
       if (controls.toolFilter) request.toolFilter = controls.toolFilter
 
       if (args.run_in_background === false) {
-        let { result, dump } = await runOne(request, exec.signal, controls.skills, args.subagent_type, role.path)
+        let { result, dump, droppedFilter } = await runOne(request, exec.signal, controls.skills, args.subagent_type, role.path)
         let routeUsed = agentOptions
         const pr = parentRoute(parent)
         if (looksLikeAuth(result, dump) && pr && !sameRoute(pr, agentOptions)) {
@@ -507,6 +642,7 @@ function apply(ctx, config) {
           const r2 = await runOne(retry, exec.signal, controls.skills, args.subagent_type, role.path)
           result = r2.result
           dump = r2.dump
+          droppedFilter = r2.droppedFilter
           routeUsed = pr
         }
         const error = stopReasonError(result)
@@ -514,16 +650,36 @@ function apply(ctx, config) {
           const partial = blockText(result.output)
           return { kind: 'error', message: error + '\nroute: ' + routeUsed.provider + '/' + routeUsed.model + '\n--- child events ---\n' + (dump || partial), warnings: controls.warnings }
         }
+        if (droppedFilter) controls.warnings.push('role tool whitelist was dropped: a listed tool is not in the child\'s tool view (platform/preset mismatch); role runs with full tool access')
         return { kind: 'foreground', runId: String(routeUsed.provider + '/' + routeUsed.model), message: blockText(result.output), warnings: controls.warnings }
       }
 
-      const started = await ctx.subagents.startContinuable({
-        provider: 'spawn',
-        label: args.description || args.subagent_type,
-        request,
-        signal: exec.signal
-      })
+      let started
+      let droppedFilter = false
+      try {
+        started = await ctx.subagents.startContinuable({
+          provider: 'spawn',
+          label: args.description || args.subagent_type,
+          request,
+          signal: exec.signal
+        })
+      } catch (error) {
+        if (request.toolFilter && looksLikeRestrictError(error)) {
+          const withoutFilter = Object.assign({}, request)
+          delete withoutFilter.toolFilter
+          started = await ctx.subagents.startContinuable({
+            provider: 'spawn',
+            label: args.description || args.subagent_type,
+            request: withoutFilter,
+            signal: exec.signal
+          })
+          droppedFilter = true
+        } else {
+          throw error
+        }
+      }
       announceRole(started.childId, args.subagent_type, role.path)
+      if (droppedFilter) controls.warnings.push('role tool whitelist was dropped: a listed tool is not in the child\'s tool view (platform/preset mismatch); role runs with full tool access')
       return { kind: 'continuable', subagentId: String(started.childId), warnings: controls.warnings }
     }
   })
@@ -586,6 +742,7 @@ function apply(ctx, config) {
         for (const entry of entries) {
           if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue
           const subagent_type = entry.name.slice(0, -3)
+          if (!ROLE_NAME.test(subagent_type)) continue
           if (seen.has(subagent_type)) continue
           seen.add(subagent_type)
           let parsed = { body: '', meta: {} }
@@ -663,6 +820,7 @@ function apply(ctx, config) {
         for (const entry of entries) {
           if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue
           const subagent_type = entry.name.slice(0, -3)
+          if (!ROLE_NAME.test(subagent_type)) continue
           if (seen.has(subagent_type)) continue
           seen.add(subagent_type)
           let parsed = { body: '', meta: {} }

@@ -87,7 +87,68 @@ function resolveRolesDir(config) {
   return join(dshHome, 'agents')
 }
 
-// Same minimal frontmatter dialect as team-delegate/lib/index.js.
+// Same minimal frontmatter dialect as team-delegate/lib/index.js (mirrored
+// verbatim so the two layers never disagree): supports plain `key: value`,
+// YAML block lists (`key:` + indented `- item`), and inline comments.
+
+// Strip an unquoted, outside-bracket YAML inline comment (` # ...`).
+function stripInlineComment(line) {
+  let depth = 0
+  let quote = ''
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (quote) {
+      if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue }
+    if (ch === '[' || ch === '{') { depth++; continue }
+    if (ch === ']' || ch === '}') { depth = Math.max(0, depth - 1); continue }
+    if (ch === '#' && depth === 0) return line.slice(0, i).trim()
+  }
+  return line.trim()
+}
+
+// Parse frontmatter lines into meta: list fields become string[] (block lists
+// and inline `[a, b]` both), scalar fields stay strings.
+function parseFrontmatterMeta(frontmatter) {
+  const lines = frontmatter.split('\n')
+  const meta = {}
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripInlineComment(lines[i])
+    if (!line || line === '---') continue
+    const m = /^([A-Za-z0-9_-]+):(?:\s*(.*))?$/.exec(line)
+    if (!m) continue
+    const key = m[1]
+    let value = (m[2] === undefined ? '' : m[2]).replace(/^['"]|['"]$/g, '').trim()
+    if (value === '') {
+      const indent = /^[ \t]*/.exec(lines[i])[0].length
+      const items = []
+      let j = i + 1
+      for (; j < lines.length; j++) {
+        const rawNext = lines[j]
+        const rawIndent = /^[ \t]*/.exec(rawNext)[0].length
+        const next = stripInlineComment(rawNext)
+        if (!next) continue
+        if (next.startsWith('-')) {
+          if (rawIndent <= indent) break
+          items.push(next.replace(/^[ \t]*-\s*/, '').replace(/^['"]|['"]$/g, '').trim())
+          continue
+        }
+        if (/^[ \t]*[A-Za-z0-9_-]+:/.test(next) && rawIndent <= indent) break
+        break
+      }
+      if (items.length > 0) {
+        meta[key] = items
+        i = j - 1
+        continue
+      }
+    }
+    meta[key] = value
+  }
+  return meta
+}
+
 function parseRole(raw) {
   const text = String(raw)
   const firstNL = text.indexOf('\n')
@@ -104,12 +165,8 @@ function parseRole(raw) {
   }
   if (closing < 0) return { body: text.trim(), meta: {} }
   const frontmatter = text.slice(firstNL + 1, closing)
-  const meta = {}
-  for (const line of frontmatter.split('\n')) {
-    const m = /^\s*([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line)
-    if (m) meta[m[1]] = m[2].replace(/^['"]|['"]$/g, '').trim()
-  }
-  return { body: text.slice(closing + 3).replace(/^\r?\n/, '').trim(), meta }
+  const body = text.slice(closing + 3).replace(/^\r?\n/, '').trim()
+  return { body, meta: parseFrontmatterMeta(frontmatter) }
 }
 
 function parseListField(value) {
@@ -155,8 +212,8 @@ function apply(ctx, config) {
         if (raw !== undefined) {
           const meta = parseRole(raw).meta
           const allowRaw = parseListField(meta.tools)
-          const denyRaw = parseListField(meta.disallowedTools)
-          const servers = parseListField(meta.mcp_servers)
+          const denyRaw = parseListField(meta.disallowedTools ?? meta.disallowed_tools)
+          const servers = parseListField(meta.mcp_servers ?? meta.mcpServers)
           if (allowRaw.length > 0) info.allowTools = new Set(allowRaw.flatMap(normalizeToolName))
           for (const n of denyRaw.flatMap(normalizeToolName)) info.denyTools.add(n)
           if (servers.length > 0) info.mcpServers = servers.map((s) => String(s).toLowerCase())
@@ -213,6 +270,13 @@ function apply(ctx, config) {
     const info = registered.get(String(agent.id))
     if (!info || !info.restricted) return next()
     const name = exec.name
+
+    // Mechanism-tool exemption: tools the child answers through live in the
+    // child's OWN layer (not inherited), so DSH's restrict() never constrains
+    // them ("must not strip the machinery it answers through"). Mirror that
+    // here so a whitelist/blacklist cannot break the report channel a
+    // continuable subagent is told to use before finishing.
+    if (name === 'report') return next()
 
     // 1. disallowedTools — absolute blacklist.
     if (info.denyTools.has(name)) {

@@ -47,7 +47,17 @@ skills: [novel-punctuation-cleaner]
 你是资深网文校对润色师。职责：...
 ```
 
-`team-delegate` 会把这些字段翻译成子代理的 `toolFilter`（软限制，影响提示词可见性）和技能提示词；**硬性执行由 `dsh-role-guard` 完成**。
+`team-delegate` 会把这些字段翻译成子代理的 `toolFilter`（内部调用 `tools.restrict()`，注册表层硬执行——白名单外工具子代理调不到，会报 `UNKNOWN_TOOL`）和技能提示词。工具名会对照**主代理可见视图**校验存在性（含 preset 层工具；平台差异如 macOS 的 `Bash`→`bash` 自动适配）。若某个工具在子代理视图里实际不存在导致 `restrict()` 拒绝，委托会自动**去掉 toolFilter 重试**并提示告警，而不是整体失败。
+
+> 💡 **frontmatter 支持 YAML 块状列表和行内注释**（与 `dsh-role-guard` 相同的解析方言）：
+> ```yaml
+> tools:
+>   - read
+>   - write
+> skills:
+>   - proofreader   # 行内注释也会被正确剥离
+> ```
+> 等价于 `tools: [read, write]`、`skills: [proofreader]`。
 
 ## 入口
 

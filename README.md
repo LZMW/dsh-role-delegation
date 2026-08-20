@@ -26,9 +26,13 @@
 
 **为什么是两个插件？**
 
-- `team-delegate` 负责「怎么派」：读角色文件、注入 persona、选模型路由、设置子代理的工具可见性（`toolFilter`，软限制，只影响提示词层面）。
-- `dsh-role-guard` 负责「派出去之后不能越权」：在宿主作用域拦截每一个工具调用，对带限制的角色**硬拒绝**越权调用。它覆盖所有会话、所有预设、前台和后台子代理——是运行时兜底（`toolFilter` 只能影响子代理"看到"什么，无法阻止其尝试调用）。
-- 两者的耦合只有一个点：`team_delegate` 在 spawn 后用 `roleGuard.register(childId, roleName)` 通知守卫。守卫未挂载时 `team-delegate` 完全可用（降级为不限制）。
+- `team-delegate` 负责「怎么派」：读角色文件、注入 persona、选模型路由、通过 `request.toolFilter`（内部调用 `tools.restrict()`）限制子代理的工具可见性。`restrict()` 本身是**注册表层的硬执行**——子代理调不到白名单外的工具（会报 `UNKNOWN_TOOL`），限制在整个子代理生命周期持续生效。
+- `dsh-role-guard` 负责「白名单之外的三层增量」，在宿主作用域的 `tools/pre-execute` 瀑布上做**运行时**检查：
+  1. **skill 参数级白名单**：`restrict()` 只能整体禁用/放行 `skill` 工具，做不到"只允许加载技能 A"——guard 检查 `skill` 的 `arguments.name` 是不是白名单内的技能。
+  2. **MCP 服务器前缀动态准入**：`restrict()` 是 spawn 时的快照；guard 在每次调用时按 `mcp__<server>__*` 前缀实时判定。
+  3. **`disallowedTools` 黑名单优先序**：deny 在任何 allow 判定之前生效。
+  - 它还覆盖**所有会话、所有预设、前台和后台子代理**（含 spawn 后才注册的工具），是跨作用域的兜底。
+- 两者的耦合只有一个点：`team_delegate` 在 spawn 后用 `roleGuard.register(childId, roleName, rolePath)` 通知守卫。守卫未挂载时 `team-delegate` 完全可用（降级为只有 `restrict()` 的软白名单 + 无参数级 skill 控制）。
 
 ## 功能特性
 

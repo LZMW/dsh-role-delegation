@@ -240,31 +240,37 @@ function blockText(blocks) {
 
 // The parent agent's CURRENT actual route, read from its last session
 // `request/context` event (records what each real request used after the
-// agent/request waterfall, unlike the possibly-stale `options`).
+// agent/request waterfall, unlike the possibly-stale `options`). Scanned from
+// the TAIL so a long session is O(latest) not O(whole history).
 function parentRoute(agent) {
   if (!agent) return undefined
   try {
     const events = agent.session && agent.session.events ? agent.session.events : []
-    let route
-    for (const ev of events) {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i]
       const d = ev && ev.data ? ev.data : {}
       if (ev && ev.type === 'request/context' && typeof d.provider === 'string' && d.provider.length > 0 && typeof d.model === 'string' && d.model.length > 0) {
-        route = { provider: d.provider, model: d.model }
+        return { provider: d.provider, model: d.model }
       }
     }
-    return route
+    return undefined
   } catch {
     return undefined
   }
 }
 
 // Diagnostics: dump the settled child's session events to find the real failure.
+// Only the TAIL of the log is dumped (maxLen output cap + a bounded event
+// window) — the failure surface is always near the end, so a long-running
+// child does not force a full-history scan per delegation.
 function dumpChildEvents(child, maxLen) {
   if (!child) return ''
   try {
     const events = child.session && child.session.events ? child.session.events : []
+    const start = Math.max(0, events.length - 200)
     const out = []
-    for (const ev of events) {
+    for (let i = start; i < events.length; i++) {
+      const ev = events[i]
       const d = ev && ev.data ? ev.data : {}
       const brief = {}
       if (ev && ev.type) brief.t = ev.type
@@ -596,7 +602,14 @@ function apply(ctx, config) {
         properties: {
           kind: { type: 'string', required: true },
           subagentId: { type: 'string' },
-          runId: { type: 'string' },
+          route: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              provider: { type: 'string', required: true },
+              model: { type: 'string', required: true }
+            }
+          },
           message: { type: 'string' },
           warnings: { type: 'array', items: { type: 'string' } }
         }
@@ -651,7 +664,7 @@ function apply(ctx, config) {
           return { kind: 'error', message: error + '\nroute: ' + routeUsed.provider + '/' + routeUsed.model + '\n--- child events ---\n' + (dump || partial), warnings: controls.warnings }
         }
         if (droppedFilter) controls.warnings.push('role tool whitelist was dropped: a listed tool is not in the child\'s tool view (platform/preset mismatch); role runs with full tool access')
-        return { kind: 'foreground', runId: String(routeUsed.provider + '/' + routeUsed.model), message: blockText(result.output), warnings: controls.warnings }
+        return { kind: 'foreground', route: { provider: routeUsed.provider, model: routeUsed.model }, message: blockText(result.output), warnings: controls.warnings }
       }
 
       let started

@@ -16,6 +16,8 @@
 - **guard 注册表泄漏（Bug 6 前台部分）**：前台一次性子代理 dispose 后 unregister 其守卫表项。
 - **驼峰变体不一致（Bug 9）**：`disallowed_tools` / `mcpServers` 变体此前只在 `team_roles` 展示层生效、执行层不认。现在执行两层（delegate + guard）都认这些别名。
 - **列出非法角色名（Bug 10）**：`team_roles` / `team_find` 现在过滤不合 `subagent_type` 命名规则（小写字母/数字/连字符）的文件，避免列出 `team_delegate` 会拒绝的角色。
+- **前台返回值 `runId` 语义滥用（Bug 11）**：此前 `runId` 字段塞的是 `provider/model` 路由字符串，名不符实。现改为结构化 `route: { provider, model }` 字段，`runId` 移除。
+- **会话事件全量扫描（Bug 12）**：`parentRoute` 改为从事件尾部倒序找最近一条 `request/context`（长会话 O(最近) 而非 O(全历史)）；`dumpChildEvents` 只 dump 尾部 200 条事件窗口。
 
 ### 文档
 

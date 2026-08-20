@@ -254,12 +254,25 @@ function apply(ctx, config) {
   }
 
   // Restore the persisted mapping at startup (permissions re-read on resume).
+  // Also prune entries whose agent no longer exists (finished while the
+  // process was down — the disposed listener could not fire for them).
   ;(async () => {
     const loaded = await loadRegistry(registryFile)
+    const live = new Set()
+    try {
+      const agentsSvc = ctx.get('agents')
+      if (agentsSvc && typeof agentsSvc.list === 'function') {
+        for (const a of agentsSvc.list()) live.add(String(a && a.id))
+      }
+    } catch {}
     for (const [id, entry] of Object.entries(loaded)) {
       if (entry && typeof entry.role === 'string' && ROLE_NAME.test(entry.role)) {
+        if (live.size > 0 && !live.has(id)) continue // prune finished agents
         persisted.set(id, { role: entry.role, rolePath: typeof entry.rolePath === 'string' ? entry.rolePath : undefined })
       }
+    }
+    if (persisted.size !== Object.keys(loaded).length) {
+      await saveRegistry(registryFile, Object.fromEntries(persisted))
     }
   })()
 
@@ -277,6 +290,18 @@ function apply(ctx, config) {
     const entry = persisted.get(id)
     if (!entry) return
     announce(id, entry.role, entry.rolePath).catch(() => {})
+  })
+
+  // Garbage collection: when any agent leaves the registry (one-shot done,
+  // background child finished, or cancelled), drop its guard entry from both
+  // the in-memory table and the persisted registry. This keeps the registry
+  // file from growing unbounded across many team runs.
+  ctx.on('agent/disposed', (payload) => {
+    const agent = payload && payload.agent
+    if (!agent) return
+    const id = String(agent.id)
+    if (registered.delete(id)) persistRemove(id)
+    else if (persisted.has(id)) persistRemove(id)
   })
 
   // The absolute role file that won resolution, or undefined when team-delegate

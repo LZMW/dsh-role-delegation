@@ -254,20 +254,27 @@ function apply(ctx, config) {
   }
 
   // Restore the persisted mapping at startup (permissions re-read on resume).
-  // Also prune entries whose agent no longer exists (finished while the
-  // process was down — the disposed listener could not fire for them).
+  // We deliberately do NOT prune against ctx.agents.list(): a background child
+  // that is [ready] (resumable in durable storage) is not a live agent until
+  // resumed, and cold restart needs its mapping. The only safe prune signal is
+  // durable-storage absence, checked via sessionPersistence.list() when it is
+  // available; otherwise we keep every entry (they are small and UUIDs never
+  // reuse, so stale entries are inert).
   ;(async () => {
     const loaded = await loadRegistry(registryFile)
-    const live = new Set()
+    const durable = new Set()
     try {
-      const agentsSvc = ctx.get('agents')
-      if (agentsSvc && typeof agentsSvc.list === 'function') {
-        for (const a of agentsSvc.list()) live.add(String(a && a.id))
+      const sp = ctx.get('sessionPersistence')
+      if (sp && typeof sp.list === 'function') {
+        const headers = await sp.list()
+        for (const h of headers || []) durable.add(String(h && h.id))
       }
     } catch {}
     for (const [id, entry] of Object.entries(loaded)) {
       if (entry && typeof entry.role === 'string' && ROLE_NAME.test(entry.role)) {
-        if (live.size > 0 && !live.has(id)) continue // prune finished agents
+        // Only prune when the durability set is authoritative AND the session
+        // is absent from it. When durability is unavailable, keep everything.
+        if (durable.size > 0 && !durable.has(id)) continue
         persisted.set(id, { role: entry.role, rolePath: typeof entry.rolePath === 'string' ? entry.rolePath : undefined })
       }
     }
@@ -292,16 +299,29 @@ function apply(ctx, config) {
     announce(id, entry.role, entry.rolePath).catch(() => {})
   })
 
-  // Garbage collection: when any agent leaves the registry (one-shot done,
-  // background child finished, or cancelled), drop its guard entry from both
-  // the in-memory table and the persisted registry. This keeps the registry
-  // file from growing unbounded across many team runs.
+  // Garbage collection: when an agent leaves the LIVE registry (its process-local
+  // fiber unloads), drop its in-memory guard entry immediately. Persisted mapping
+  // cleanup is conditional: a background (continuable) child that is [ready] in
+  // durable storage must keep its mapping for a cold restart, so we remove the
+  // persisted entry only when durable-storage absence proves the child is gone
+  // for good. sessionPersistence.list() is the authoritative durability check.
   ctx.on('agent/disposed', (payload) => {
     const agent = payload && payload.agent
     if (!agent) return
     const id = String(agent.id)
-    if (registered.delete(id)) persistRemove(id)
-    else if (persisted.has(id)) persistRemove(id)
+    registered.delete(id)
+    if (!persisted.has(id)) return
+    ;(async () => {
+      try {
+        const sp = ctx.get('sessionPersistence')
+        if (!sp || typeof sp.list !== 'function') return // keep mapping, unknown state
+        const headers = await sp.list()
+        const durable = new Set((headers || []).map((h) => String(h && h.id)))
+        if (!durable.has(id)) persistRemove(id)
+      } catch {
+        // unknown durability state — keep the mapping to be safe
+      }
+    })()
   })
 
   // The absolute role file that won resolution, or undefined when team-delegate

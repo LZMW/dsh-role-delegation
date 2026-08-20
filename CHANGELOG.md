@@ -1,15 +1,26 @@
 # Changelog
 
+## 1.3.2
+
+### 修复
+
+- **后台子代理冷恢复映射竞态（TOCTOU 真实体现）**：`team_delegate` 的 `announceRole` 是 fire-and-forget 异步，若子代理极快完成，`agent/disposed` 可能抢在 `persistEntry` 写文件前触发——`[ready]`（存储里可恢复）的后台子代理会丢失冷恢复映射，重启后唤醒失去 guard 权限。现在 `agent/disposed` **只删内存表**，持久化映射仅在 `sessionPersistence.list()` 证明该 session 已从持久化存储消失时才清理；启动修剪也改用 `sessionPersistence.list()`（而非 `agents.list()`——它不含未唤醒的 `[ready]` 子代理）。可恢复子代理的映射被正确保留，真正终结的才被清理。
+
+## 1.3.1
+
+### 修复
+
+- **guard 注册表垃圾增长**：新增 `agent/disposed` 监听清理内存表项，持久化条目按 `sessionPersistence.list()` 的持久化存储存在性判断后清理（可恢复的保留、真正终结的删除）；启动时同样按持久化存储修剪。多次运行团队后 `.role-guard.registry.json` 不再无限增长，同时不误删可冷恢复的子代理映射。
+
 ## 1.3.0
 
 ### 修复
 
 - **后台冷恢复守卫注册表丢失（审查"冷恢复断链"）**：此前 guard 的注册表是纯内存态，DSH 重启后后台 continuable 子代理的 persona/toolFilter 会从会话 descriptor 冷恢复，但守卫的 skill/mcp/黑名单强制全丢（不对称）。现在 `childId → {role, rolePath}` 映射持久化到 `$DSH_HOME/agents/.role-guard.registry.json`，启动时加载，并在 `agent/session-start`（`source: 'resume'/'startup'`）时对恢复的子代理重新 announce——权限在恢复时从角色文件**重读**，spawn 到 resume 之间的角色编辑也会被拾取。已离线验证完整流程（register→重启→resume→权限恢复）。
-- **guard 注册表垃圾增长**：新增 `agent/disposed` 监听——任何 agent 离开注册表（一次性子代理完成、后台子代理终结、被取消）都会清理其内存表项和持久化条目；启动时还会按 `ctx.agents.list()` 修剪已不存在 agent 的残留条目。多次运行团队后 `.role-guard.registry.json` 不再无限增长。
 
 ### 已知取舍
 
-- 后台子代理若在进程关闭前仍活跃（进程被杀时未终结），其 registry 条目在下一次启动清理时按"agent 不存在"修剪——前提是它确实已终结；若它仍可恢复则保留（这正是冷恢复要的）。
+- 守卫在角色文件缺失/不可读时按"无限制"注册（fail-open）——保证"缺 guard/缺文件不阻塞委托"。
 
 ## 1.2.0
 

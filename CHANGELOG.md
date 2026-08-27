@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1
+
+### 修复
+
+- **技能目录过滤导致每 step 重复注入（digest 不一致）**：v1.4.0 重写 catalog 时把 `source.entries` 也缩小为白名单，而 `dsh-tool-skill` 的 digest 机制基于 `source.entries` 判定"目录是否变化"——过滤版 digest 与全量 digest 永不相等，导致每个 step 都重新注入一条 catalog UPDATE（token 浪费 + session 膨胀）。现在**只改写模型看到的文本**、保留完整 `source.entries`：digest 稳定不再重复注入，模型仍只见白名单技能。真实多步轨迹验证：修复前 2 step → 2 条 catalog，修复后 4 step → 1 条。
+
 ## 1.4.0
 
 ### 新增

@@ -1,6 +1,6 @@
 {
   "name": "dsh-role-guard",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Host-level TOOL / MCP / SKILL permission guard for role-directed team delegation in DSH. Enforces role frontmatter fields (tools / disallowedTools / mcp_servers / skills) at the tools/pre-execute waterfall for spawned role children, and filters the model-facing skill catalog down to the role's whitelist so out-of-scope skills are invisible, not just call-denied.",
   "type": "module",
   "main": "lib/index.js",

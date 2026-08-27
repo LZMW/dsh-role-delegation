@@ -273,10 +273,14 @@ function catalogTextFor(entries, update) {
   return lines.join('\n')
 }
 
-// Filter one skill-catalog message to the whitelist. Returns the replacement
-// message (or null when the catalog message should be dropped entirely —
-// never happens, but defensive). Mutates nothing; returns a fresh message so
-// the session log is not rewritten.
+// Filter one skill-catalog message's MODEL-FACING TEXT to the whitelist while
+// PRESERVING the full source.entries. Why: dsh-tool-skill's digest logic (which
+// decides whether to re-inject the catalog each step) hashes source.entries,
+// never the rendered text. If we shrank entries to the whitelist, the digest
+// would never match what tool-skill computes (the full list), so it would
+// re-inject a catalog UPDATE every step — token bloat in long subagent runs.
+// Keeping entries whole keeps the digest stable (no re-injection), while the
+// text the model actually reads shows only the whitelisted skills.
 function filterCatalogMessage(message, allowed) {
   const src = message && message.source ? message.source : null
   if (!src || src.kind !== 'skill-catalog') return message
@@ -285,10 +289,11 @@ function filterCatalogMessage(message, allowed) {
   const allowedSet = new Set(allowed)
   const kept = entries.filter((e) => e && typeof e.name === 'string' && allowedSet.has(e.name))
   const update = src.update === true
+  // Rewrite ONLY the text. source.entries stays the full list for digest
+  // stability; the model sees the whitelist.
   return {
     ...message,
-    content: [{ type: 'text', text: catalogTextFor(kept, update) }],
-    source: { ...src, entries: kept }
+    content: [{ type: 'text', text: catalogTextFor(kept, update) }]
   }
 }
 

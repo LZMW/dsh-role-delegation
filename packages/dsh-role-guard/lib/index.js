@@ -244,7 +244,12 @@ function parseListField(value) {
 // skills become invisible, not just call-denied.
 
 // Re-render a skill-catalog message's text from its (already filtered) entries.
-// Mirrors dsh-tool-skill's renderCatalogMessage / renderCatalogUpdate framing.
+// Mirrors dsh-tool-skill's renderCatalogMessage / renderCatalogUpdate framing,
+// including the same pseudo-XML escaping (escapeText) so the rewritten catalog
+// is byte-consistent with what dsh-tool-skill would have emitted.
+function escapeCatalogText(value) {
+  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+}
 function catalogTextFor(entries, update) {
   const lines = ['<system-reminder>']
   if (update) {
@@ -256,7 +261,7 @@ function catalogTextFor(entries, update) {
   if (entries.length === 0) {
     lines.push('No skills are currently available through the `skill` tool. Do not use names from earlier skill catalogs.')
   } else {
-    for (const e of entries) lines.push('- `' + e.name + '`: ' + String(e.description || '').replace(/\s+/g, ' ').trim())
+    for (const e of entries) lines.push('- `' + e.name + '`: ' + escapeCatalogText(String(e.description || '').replace(/\s+/g, ' ').trim()))
   }
   lines.push('</available_skills>', '')
   if (entries.length === 0) {

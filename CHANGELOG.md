@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.2
+
+### 修复
+
+- **技能目录过滤 fail-closed（防异常 catalog 泄漏全量技能）**：`filterCatalogMessage` 此前在 `source.entries` 结构异常（冷恢复 seed、外部写入、损坏数据）时**直接放行整条 catalog**——若该 catalog 文本含全量技能名，白名单外的技能会绕过过滤泄漏给模型。现在 entries 无效时按**空白名单**重写文本（显示"No skills available"），异常 catalog 绝不泄漏非白名单技能名。同时补回归：无限制角色（无 tools/skills/mcp_servers）仍看到全量 19 技能 + 99 工具，prepend 过滤器不误伤。
+
 ## 1.4.1
 
 ### 修复

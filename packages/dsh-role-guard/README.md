@@ -74,7 +74,7 @@ if (name === 'skill' && info.skillsDeclared) {
 - 与 `team-delegate` 共享同一套 Claude Code → DSH 工具名映射，两处不会打架。
 - 主代理与未注册角色的内置子代理直接放行，不受影响。
 - 最小 frontmatter 解析器与 `team-delegate` 一致；解析失败时按"无限制"处理，不阻塞委托。
-- **目录可见性（v1.4.0+）**：`skills:` 白名单角色子代理的 `<available_skills>` 目录被过滤为白名单子集（prepend pre-step 重写）；只改写模型可见的文本、保留完整 `source.entries`，因此 `dsh-tool-skill` 的 digest 机制不受扰动、不会每 step 重复注入目录（v1.4.1 修复）。执行时的 `tools/pre-execute` deny 保留为第二道防线，防已入上下文的旧目录消息。
+- **目录可见性（v1.4.0+）**：`skills:` 白名单角色子代理的 `<available_skills>` 目录被过滤为白名单子集（prepend pre-step 重写）；只改写模型可见的文本、保留完整 `source.entries`，因此 `dsh-tool-skill` 的 digest 机制不受扰动、不会每 step 重复注入目录（v1.4.1 修复）。`source.entries` 结构异常时 **fail-closed** 按空白名单显示，异常 catalog 不泄漏全量技能（v1.4.2）。执行时的 `tools/pre-execute` deny 保留为第二道防线，防已入上下文的旧目录消息。
 - 工具目录（`tools:` 白名单）的可见性由 `team-delegate` 的 spawn 时 `toolFilter` 负责；本插件的 host 级 deny 是运行时兜底。
 
 ## 安装

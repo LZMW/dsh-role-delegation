@@ -281,16 +281,21 @@ function catalogTextFor(entries, update) {
 // re-inject a catalog UPDATE every step — token bloat in long subagent runs.
 // Keeping entries whole keeps the digest stable (no re-injection), while the
 // text the model actually reads shows only the whitelisted skills.
+//
+// Fail-closed on unreadable entries: a skill-catalog message whose source.entries
+// is not a valid array cannot be verified against the whitelist, so its text is
+// rewritten to the EMPTY whitelist (no skills shown) rather than being passed
+// through — a malformed/foreign catalog must never leak non-whitelisted skill
+// names into the model's context.
 function filterCatalogMessage(message, allowed) {
   const src = message && message.source ? message.source : null
   if (!src || src.kind !== 'skill-catalog') return message
-  const entries = Array.isArray(src.entries) ? src.entries : null
-  if (!entries) return message
   const allowedSet = new Set(allowed)
-  const kept = entries.filter((e) => e && typeof e.name === 'string' && allowedSet.has(e.name))
+  const entries = Array.isArray(src.entries) ? src.entries : null
+  const kept = entries ? entries.filter((e) => e && typeof e.name === 'string' && allowedSet.has(e.name)) : []
   const update = src.update === true
-  // Rewrite ONLY the text. source.entries stays the full list for digest
-  // stability; the model sees the whitelist.
+  // Rewrite ONLY the text. source.entries stays whole for digest stability; the
+  // model sees the whitelist (or nothing when entries are unreadable).
   return {
     ...message,
     content: [{ type: 'text', text: catalogTextFor(kept, update) }]

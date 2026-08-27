@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0
+
+### 新增
+
+- **技能目录可见性过滤（让"子代理只看见 yaml 允许的技能"真正落地）**：此前 `skills:` 白名单只在调用时硬拒绝，角色子代理仍能看到全部 `<available_skills>` 目录（会去尝试加载白名单外技能再被拦）。现在 `dsh-role-guard` 以 `prepend` 注册 `agent/pre-step` 监听，在 `dsh-tool-skill` 注入目录**之后**把它重写为白名单子集——白名单外的技能对子代理**不可见**，执行时的 `tools/pre-execute` deny 保留为第二道防线（防已入上下文的旧目录消息）。`skills: []`（禁全部技能）时目录显示"No skills are currently available"。
+
 ## 1.3.2
 
 ### 修复

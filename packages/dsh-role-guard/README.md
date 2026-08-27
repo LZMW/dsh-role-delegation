@@ -53,7 +53,7 @@ if (name === 'skill' && info.skillsDeclared) {
 
 `team-delegate` 的 `toolFilter`（内部 `tools.restrict()`）是**注册表层**的硬执行——子代理调不到白名单外工具（`UNKNOWN_TOOL`），限制持续整个生命周期。但 `restrict()` 有它够不到的增量，正是本插件补上的：
 
-1. **skill 参数级白名单**：`restrict()` 只能整体禁/放 `skill` 工具；本插件能检查 `skill` 的 `arguments.name`，做到"只允许加载技能 A"。
+1. **skill 参数级白名单 + 目录可见性过滤**：`restrict()` 只能整体禁/放 `skill` 工具；本插件能检查 `skill` 的 `arguments.name` 做到"只允许加载技能 A"，并且（v1.4.0+）在 `agent/pre-step` 用 `prepend` 把模型看到的 `<available_skills>` 目录**重写为白名单子集**——白名单外的技能对子代理**不可见**，而不是仅调用时被拒。
 2. **MCP 服务器前缀动态准入**：`restrict()` 是 spawn 时快照；本插件每次调用按 `mcp__<server>__*` 实时判定。
 3. **`disallowedTools` 黑名单优先序**：deny 先于任何 allow 判定。
 4. **跨作用域兜底**：宿主根作用域覆盖所有会话/预设/前台/后台子代理（含 spawn 后才注册的工具）。
@@ -74,7 +74,8 @@ if (name === 'skill' && info.skillsDeclared) {
 - 与 `team-delegate` 共享同一套 Claude Code → DSH 工具名映射，两处不会打架。
 - 主代理与未注册角色的内置子代理直接放行，不受影响。
 - 最小 frontmatter 解析器与 `team-delegate` 一致；解析失败时按"无限制"处理，不阻塞委托。
-- 局限（有意为之）：角色子代理仍能看到完整工具目录，但越权调用会被硬拒绝。
+- **目录可见性（v1.4.0+）**：`skills:` 白名单角色子代理的 `<available_skills>` 目录被过滤为白名单子集（prepend pre-step 重写）；执行时的 `tools/pre-execute` deny 保留为第二道防线，防已入上下文的旧目录消息。
+- 工具目录（`tools:` 白名单）的可见性由 `team-delegate` 的 spawn 时 `toolFilter` 负责；本插件的 host 级 deny 是运行时兜底。
 
 ## 安装
 

@@ -29,9 +29,13 @@
 // spawn-time toolFilter (team_delegate) handles prompt visibility; this guard
 // is the authoritative runtime deny layer.
 //
-// Limitation (by design): a role child may still SEE other tools/skills in its
-// catalog (no per-agent catalog filter), but calling a non-whitelisted one is
-// hard-denied with a clear message.
+// Skill CATALOG visibility (since v1.4.0): a role child with a `skills:`
+// field no longer SEEs every skill. A prepended `agent/pre-step` listener
+// rewrites the model-facing `<available_skills>` catalog (emitted by
+// dsh-tool-skill) down to the whitelist before it reaches the model, so
+// out-of-whitelist skills are invisible, not just call-denied. The runtime
+// deny below stays as the second line of defense (a stale catalog message
+// already in context must still fail closed).
 //
 // Cold-resume persistence: the in-memory `registered` table is per-process, so
 // a background (continuable) child that survives a DSH restart would lose its
@@ -46,6 +50,7 @@ import z from '@deepseek-ai/schemastery'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const name = 'dsh-role-guard'
 const inject = []
@@ -230,6 +235,58 @@ function parseListField(value) {
   return String(value).replace(/[[\]{}]/g, '').split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
 }
 
+// ── skill CATALOG visibility filter ─────────────────────────────────────────
+// dsh-tool-skill injects a model-facing `<available_skills>` catalog into the
+// first step of every agent that resolves its `skill` tool. That catalog lists
+// EVERY skill in scope — so a role child with a `skills:` whitelist would still
+// SEE every skill (and only be denied at call time). This filter rewrites the
+// catalog message down to the whitelist before the model sees it: out-of-list
+// skills become invisible, not just call-denied.
+
+// Re-render a skill-catalog message's text from its (already filtered) entries.
+// Mirrors dsh-tool-skill's renderCatalogMessage / renderCatalogUpdate framing.
+function catalogTextFor(entries, update) {
+  const lines = ['<system-reminder>']
+  if (update) {
+    lines.push('The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session:', '')
+  } else {
+    lines.push('A skill is a reusable set of task-specific instructions. The following skills are available in this session:', '')
+  }
+  lines.push('<available_skills>')
+  if (entries.length === 0) {
+    lines.push('No skills are currently available through the `skill` tool. Do not use names from earlier skill catalogs.')
+  } else {
+    for (const e of entries) lines.push('- `' + e.name + '`: ' + String(e.description || '').replace(/\s+/g, ' ').trim())
+  }
+  lines.push('</available_skills>', '')
+  if (entries.length === 0) {
+    lines.push('A user may still invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool for it.')
+  } else {
+    lines.push('Use only names in this replacement catalog. If the user names a listed skill, or the task clearly matches its description, call the `skill` tool with the exact name before acting.', 'A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.')
+  }
+  lines.push('</system-reminder>')
+  return lines.join('\n')
+}
+
+// Filter one skill-catalog message to the whitelist. Returns the replacement
+// message (or null when the catalog message should be dropped entirely —
+// never happens, but defensive). Mutates nothing; returns a fresh message so
+// the session log is not rewritten.
+function filterCatalogMessage(message, allowed) {
+  const src = message && message.source ? message.source : null
+  if (!src || src.kind !== 'skill-catalog') return message
+  const entries = Array.isArray(src.entries) ? src.entries : null
+  if (!entries) return message
+  const allowedSet = new Set(allowed)
+  const kept = entries.filter((e) => e && typeof e.name === 'string' && allowedSet.has(e.name))
+  const update = src.update === true
+  return {
+    ...message,
+    content: [{ type: 'text', text: catalogTextFor(kept, update) }],
+    source: { ...src, entries: kept }
+  }
+}
+
 function apply(ctx, config) {
   const rolesDir = resolveRolesDir(config)
   const registryFile = resolveRegistryFile(config)
@@ -409,6 +466,26 @@ function apply(ctx, config) {
       return out
     }
   })
+
+  // Skill CATALOG visibility gate (prepend so it runs before dsh-tool-skill's
+  // own pre-step listener and can rewrite the catalog AFTER tool-skill has
+  // appended it — await next() passes through every later listener first).
+  // Only registered role children with a `skills:` declaration are filtered;
+  // everyone else sees the untouched catalog.
+  ctx.on('agent/pre-step', async ({ agent }, next) => {
+    const decision = await next()
+    try {
+      if (!agent || !decision || decision.kind !== 'enter' || !Array.isArray(decision.messages) || decision.messages.length === 0) return decision
+      const info = registered.get(String(agent.id))
+      if (!info || !info.restricted || !info.skillsDeclared) return decision
+      const replaced = decision.messages.map((m) => filterCatalogMessage(m, info.skills))
+      return { ...decision, messages: replaced }
+    } catch {
+      // A filter failure must never break the step; the runtime deny below
+      // still fails closed on any non-whitelisted skill call.
+      return decision
+    }
+  }, { prepend: true })
 
   // The gate. Only calls from a REGISTERED role child with restrictions are
   // checked; the main agent and builtin subagents (no role) pass through.

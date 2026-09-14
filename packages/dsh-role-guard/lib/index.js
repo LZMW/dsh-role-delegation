@@ -339,7 +339,14 @@ function apply(ctx, config) {
       const sp = ctx.get('sessionPersistence')
       if (sp && typeof sp.list === 'function') {
         const headers = await sp.list()
-        for (const h of headers || []) durable.add(String(h && h.id))
+        // sessionPersistence.list() returned SessionHeader[] (h.id) through
+        // DSH 0.1.1-rc.2; 0.1.5+ returns SessionPersistenceSnapshot[] with the
+        // id at h.header.id. Read both shapes so cold-resume pruning keeps
+        // working across the version boundary.
+        for (const h of headers || []) {
+          const hid = h ? (typeof h.id === 'string' ? h.id : h.header && h.header.id) : undefined
+          if (hid) durable.add(String(hid))
+        }
       }
     } catch {}
     for (const [id, entry] of Object.entries(loaded)) {
@@ -388,7 +395,13 @@ function apply(ctx, config) {
         const sp = ctx.get('sessionPersistence')
         if (!sp || typeof sp.list !== 'function') return // keep mapping, unknown state
         const headers = await sp.list()
-        const durable = new Set((headers || []).map((h) => String(h && h.id)))
+        // Same dual-shape read as the startup restore above (h.id pre-0.1.5,
+        // h.header.id on 0.1.5+ snapshot lists).
+        const durable = new Set()
+        for (const h of headers || []) {
+          const hid = h ? (typeof h.id === 'string' ? h.id : h.header && h.header.id) : undefined
+          if (hid) durable.add(String(hid))
+        }
         if (!durable.has(id)) persistRemove(id)
       } catch {
         // unknown durability state — keep the mapping to be safe

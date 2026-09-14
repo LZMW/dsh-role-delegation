@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.3
+
+### 修复
+
+- **冷恢复持久化在 DSH 0.1.5+ 失效（`sessionPersistence.list()` 形状变更）**：0.1.1-rc.2 的 `list()` 返回 `SessionHeader[]`（id 在 `h.id`）；0.1.5 起改为返回 `SessionPersistenceSnapshot[]`（id 挪到 `h.header.id`，即 SessionHandle 生命周期重构的连带变化）。guard 的两处持久化存在性检查（启动修剪、`agent/disposed` 清理）按旧形状读 `h.id` 只能得到 `undefined`——启动时全部注册表条目被误判"已不存在"而清空、可恢复的 `[ready]` 子代理在 dispose 时即被移除持久映射。表现为**跨重启后被 resume 的后台角色子代理静默失去 guard 限制**（运行时拒绝层、skills 硬闸、技能目录过滤），不崩溃不报错。现在两处都做双形状兼容读取（`h.id` 字符串优先，否则 `h.header.id`），0.1.1–0.1.5+ 全版本可用。
+
 ## 1.4.2
 
 ### 修复

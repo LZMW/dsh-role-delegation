@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1（team-delegate）
+
+### 修复
+
+- **`session.events` 在 DSH 0.1.5+ 运行时不存在（Session 类移除公开 events 访问器）**：0.1.5 的 Session 类改为 `snapshotEvents()/ownEvents()/eventAt()` 公开 API，读 `session.events` 得 `undefined`——`parentRoute` 静默失效（无路由角色从"父会话当前实际路由"降级为部署默认，实测子代理路由 huoshan4838/deepseek-v4-pro ≠ 父会话 zhipu/glm-5.3-flash）、`dumpChildEvents` 返回空（失败诊断变薄）。新增 `sessionEvents(session)` 双形状 helper（`snapshotEvents()` 优先、`session.events` 兜底），0.1.1–0.1.5+ 全版本可用。
+
 ## 1.4.3
 
 ### 修复

@@ -238,6 +238,22 @@ function blockText(blocks) {
   return blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n')
 }
 
+// Read a session's event log across DSH versions. 0.1.5 removed the public
+// `events` array accessor on Session (replaced by snapshotEvents() /
+// ownEvents() / eventAt()); reading `session.events` there yields undefined,
+// which silently broke parent-route recovery and child-event diagnostics.
+// Prefer the 0.1.5 public API, fall back to the legacy accessor for older
+// versions.
+function sessionEvents(session) {
+  try {
+    if (session && typeof session.snapshotEvents === 'function') {
+      const snapshot = session.snapshotEvents()
+      if (Array.isArray(snapshot)) return snapshot
+    }
+  } catch {}
+  return session && Array.isArray(session.events) ? session.events : []
+}
+
 // The parent agent's CURRENT actual route, read from its last session
 // `request/context` event (records what each real request used after the
 // agent/request waterfall, unlike the possibly-stale `options`). Scanned from
@@ -245,7 +261,7 @@ function blockText(blocks) {
 function parentRoute(agent) {
   if (!agent) return undefined
   try {
-    const events = agent.session && agent.session.events ? agent.session.events : []
+    const events = sessionEvents(agent.session)
     for (let i = events.length - 1; i >= 0; i--) {
       const ev = events[i]
       const d = ev && ev.data ? ev.data : {}
@@ -266,7 +282,7 @@ function parentRoute(agent) {
 function dumpChildEvents(child, maxLen) {
   if (!child) return ''
   try {
-    const events = child.session && child.session.events ? child.session.events : []
+    const events = sessionEvents(child.session)
     const start = Math.max(0, events.length - 200)
     const out = []
     for (let i = start; i < events.length; i++) {

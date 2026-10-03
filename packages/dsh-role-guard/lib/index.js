@@ -366,7 +366,7 @@ function apply(ctx, config) {
   // guard restrictions come back (its persona/toolFilter persisted in the
   // session descriptor; the guard table must too). Source 'resume' is the cold
   // restore path; 'startup' covers children restored at boot.
-  ctx.on('agent/session-start', (payload) => {
+  function onSessionStart(payload) {
     const agent = payload && payload.agent
     const source = payload && payload.source
     if (!agent || (source !== 'resume' && source !== 'startup')) return
@@ -376,7 +376,12 @@ function apply(ctx, config) {
     const entry = persisted.get(id)
     if (!entry) return
     announce(id, entry.role, entry.rolePath).catch(() => {})
-  })
+  }
+  // DSH 0.2.0 renamed agent/session-start -> agent/created (same payload:
+  // { agent, source, signal? }). Listen on BOTH so the guard's cold-resume
+  // re-announce works on 0.1.x and 0.2.x hosts alike.
+  ctx.on('agent/created', onSessionStart)
+  ctx.on('agent/session-start', onSessionStart)
 
   // Garbage collection: when an agent leaves the LIVE registry (its process-local
   // fiber unloads), drop its in-memory guard entry immediately. Persisted mapping

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.4
+
+### 修复
+
+- **`agent/session-start` 在 DSH 0.2.0 更名为 `agent/created`（payload 同构）**：0.1.6-alpha.1 起官方把 agent 创建通知从 `agent/session-start` 改为异步串行的 `agent/created`（payload 仍为 `{ agent, source: SessionStartSource, signal? }`）。guard 的冷恢复 re-announce 此前只监听 `agent/session-start`，在 0.2.x 宿主上会静默失效——后台 `[ready]` 子代理跨重启 resume 后失去守卫限制。现在把 resume 逻辑抽成共享 handler 并**双事件注册**（`agent/created` + `agent/session-start` 兜底），0.1.x 与 0.2.x 宿主均可工作。
+
 ## 1.2.1（team-delegate）
 
 ### 修复

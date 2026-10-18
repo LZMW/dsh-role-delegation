@@ -267,7 +267,10 @@ function catalogTextFor(entries, update) {
   if (entries.length === 0) {
     lines.push('A user may still invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool for it.')
   } else {
-    lines.push('Use only names in this replacement catalog. If the user names a listed skill, or the task clearly matches its description, call the `skill` tool with the exact name before acting.', 'A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.')
+    // Same framing dsh-tool-skill emits in 0.2.1+, so a whitelisted child reads a
+    // catalog that is byte-consistent with the unfiltered one it replaces.
+    lines.push('If the user names a skill, or the task clearly matches a skill\'s description, call the `skill` tool with the exact skill name before taking task actions. Load all applicable skills, then follow their full instructions. This catalog contains summaries only; do not infer or follow a skill\'s instructions until it has been loaded.')
+    lines.push('A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.')
   }
   lines.push('</system-reminder>')
   return lines.join('\n')

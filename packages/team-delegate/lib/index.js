@@ -18,15 +18,35 @@
 //   5. built-in fallback
 //
 // Field-based controls (Claude Code style, enforced on the child):
-//   `tools:`            -> toolFilter.allow   (hard whitelist; unknown names skipped+warned)
-//   `disallowedTools:`  -> toolFilter.deny    (hard blacklist)
+//   `tools:`            -> tool restriction allow (hard whitelist; unknown names skipped+warned)
+//   `disallowedTools:`  -> tool restriction deny  (hard blacklist)
 //   `mcp_servers: [X]`  -> expand to mcp__X__* (allow if `tools:` present, else deny all
 //                          MCP tools outside the listed servers)
 //   `skills:`           -> [] => skill tool denied (hard); [a,b] => prompt-level whitelist (soft)
 // Names are mapped from Claude Code to DSH; MCP tool names pass through as-is.
+//
+// DSH 0.2.1 composition model (why the code below looks the way it does)
+//   0.2.1 replaced `ctx.subagents.start` / `startContinuable` with the single
+//   `startActivation({ provider, label, childId?, request, signal, delivery })`,
+//   and it removed `request.persona` / `request.toolFilter`: a child's persona
+//   and tool composition now belong to an Agent Preset. A role file is still a
+//   per-delegation composition, so this plugin applies it on the CHILD's own
+//   scope the moment the child is created (`agent/created`), before its first
+//   step assembles the system prompt and requests tool schemas:
+//     - role body  -> a scoped `systemPrompt.section` (same position as the
+//                     deployment persona)
+//     - tools/mcp  -> `tools.restrict` on the child registry
+//     - skills     -> `tools.guard` on the child registry (call-time deny)
+//   The child id is reserved by the caller (`startActivation({ childId })`), so
+//   the pending table is keyed before the child exists and the host-level
+//   `dsh-role-guard` can be told the role BEFORE the child can call a tool.
+//   Foreground runs use `delivery: 'caller'` (result returned, no parent
+//   message); background runs use `delivery: 'parent'` (the runtime delivers
+//   the settlement notice to the calling agent).
 
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { randomUUID } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { access, readFile, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -34,6 +54,11 @@ import { homedir } from 'node:os'
 const name = 'team-delegate'
 const inject = ['tools', 'subagents']
 const ROLE_NAME = /^[a-z0-9-]+$/
+// Role persona section name/order. `deployment:persona-prefix` is order 0, so
+// order 1 keeps the role body right after the deployment persona without ever
+// colliding with a preset-owned section name.
+const ROLE_SECTION = 'team-delegate:role'
+const ROLE_SECTION_ORDER = 1
 const FALLBACK_AGENT_OPTIONS = { provider: 'huoshan', model: 'deepseek-v4-flash' }
 const AUTH_HINT = /auth|authentication|api key|invalid key|401|403|insufficient|quota|balance|permission|无权限|鉴权|密钥/i
 
@@ -389,10 +414,10 @@ function mapToolName(rawName, ctx, parent, parentVisible) {
   })
 }
 
-// Build the child's toolFilter + skill prompt from role frontmatter fields.
+// Build the child's tool restriction + skill prompt from role frontmatter fields.
 // `skills:` empty -> deny the `skill` tool (the child sees no skills at all).
 // `skills: [a,b]` -> keep the `skill` tool but a per-child guard (installed in
-// runOne) hard-denies calls for names outside the whitelist with a clear reason.
+// `agent/created`) hard-denies calls for names outside the whitelist with a clear reason.
 function buildRoleControls(role, ctx, parent) {
   const meta = role && role.meta ? role.meta : {}
   const allowInput = parseListField(meta.tools)
@@ -467,8 +492,8 @@ function buildRoleControls(role, ctx, parent) {
   }
 
   // skills: explicit empty list -> hard-deny the skill tool; a whitelist -> soft
-  // prompt-level restriction PLUS a hard per-child guard (installed at spawn,
-  // see runOne) that denies skill calls for names outside the whitelist.
+  // prompt-level restriction PLUS a hard per-child guard (installed in
+  // `agent/created`) that denies skill calls for names outside the whitelist.
   let skillsPrompt = ''
   if (meta.skills !== undefined && skills.length === 0) {
     deny.push('skill')
@@ -537,77 +562,171 @@ function apply(ctx, config) {
     } catch {}
   }
 
-  // The unknown-tool error tools.restrict() throws when an allow/deny entry
-  // names a tool absent from the child's restrictable view. Even with live-view
-  // existence checks a race (tool registered between check and spawn, or a
-  // child-only tool) can trip it; degrade by dropping the toolFilter instead of
-  // failing the whole delegation.
-  function looksLikeRestrictError(error) {
-    const msg = String(error && error.message ? error.message : error)
-    return /tools\.restrict|unknown global tool|restrict.*unknown|names unknown/i.test(msg)
+  function unannounceRole(childId) {
+    if (childId === undefined || childId === null) return
+    try {
+      const roleGuard = ctx.get('roleGuard')
+      if (roleGuard && typeof roleGuard.unregister === 'function') roleGuard.unregister(String(childId))
+    } catch {}
   }
 
-  async function runOne(request, signal, skillAllow, roleName, rolePath) {
-    let run
-    let droppedFilter = false
+  function messageOf(error) {
+    return String(error && error.message ? error.message : error)
+  }
+
+  // The child's own systemPrompt service, as bound to the child's scope.
+  // `agent.ctx` is the per-agent scope, so a section registered through it is
+  // owned by the child's fiber (disposed with the child) and visible to no one
+  // else. Returns undefined when the runtime exposes no prompt registry.
+  function childSystemPrompt(agent) {
     try {
-      run = await ctx.subagents.start('spawn', Object.assign({}, request, { signal }))
-    } catch (error) {
-      if (request.toolFilter && looksLikeRestrictError(error)) {
-        const withoutFilter = Object.assign({}, request)
-        delete withoutFilter.toolFilter
-        try {
-          run = await ctx.subagents.start('spawn', Object.assign({}, withoutFilter, { signal }))
-          droppedFilter = true
-        } catch (error2) {
-          throw error2
-        }
+      const direct = agent.ctx.systemPrompt
+      if (direct && typeof direct.section === 'function') return direct
+    } catch {}
+    try {
+      const viaGet = agent.ctx.get('systemPrompt')
+      if (viaGet && typeof viaGet.section === 'function') return viaGet
+    } catch {}
+    return undefined
+  }
+
+  // childId -> { persona, toolFilter, skills, warnings, agent }
+  // Filled before startActivation, consumed by the `agent/created` listener.
+  const pendingChildren = new Map()
+
+  // Apply the role composition on the child's own scope. This runs while the
+  // child is being published and before its first step assembles the prompt,
+  // which is what makes a per-role persona possible again in 0.2.1.
+  ctx.on('agent/created', ({ agent }) => {
+    if (!agent) return
+    const id = String(agent.id)
+    const pending = pendingChildren.get(id)
+    if (pending === undefined) return
+    pendingChildren.delete(id)
+    pending.agent = agent
+
+    if (typeof pending.persona === 'string' && pending.persona.length > 0) {
+      const systemPrompt = childSystemPrompt(agent)
+      if (systemPrompt === undefined) {
+        pending.warnings.push('role persona was not installed: the child exposes no systemPrompt service')
       } else {
-        throw error
+        try {
+          // `interpolate: false`: a role body is free text for the model, not a
+          // template. Without it a stray `{{...}}` would make the runtime reject
+          // the child's whole prompt assembly as an unknown prompt variable.
+          systemPrompt.section({ name: ROLE_SECTION, order: ROLE_SECTION_ORDER, text: pending.persona, interpolate: false })
+        } catch (error) {
+          pending.warnings.push('role persona was not installed: ' + messageOf(error))
+        }
       }
     }
-    announceRole(run.id, roleName, rolePath)
+
+    let childTools
+    try {
+      childTools = agent.ctx.get('tools')
+    } catch {}
+
+    if (pending.toolFilter !== undefined) {
+      if (childTools && typeof childTools.restrict === 'function') {
+        try {
+          childTools.restrict(pending.toolFilter)
+        } catch (error) {
+          // The allow/deny set was resolved against the parent's live tool view,
+          // so this is a rare race (a tool registered between resolution and
+          // spawn). The host-level guard still enforces the role at call time.
+          pending.warnings.push('role tool restriction was not applied: ' + messageOf(error))
+        }
+      } else {
+        pending.warnings.push('role tool restriction was not applied: the child exposes no tools registry')
+      }
+    }
+
+    // Hard skill enforcement: deny `skill` calls outside the role whitelist on
+    // the child's own registry, so out-of-scope skills fail closed even when the
+    // prompt-level hint is ignored.
+    if (Array.isArray(pending.skills) && pending.skills.length > 0 && childTools && typeof childTools.guard === 'function') {
+      try {
+        const allowed = new Set(pending.skills)
+        const list = pending.skills.join(', ')
+        childTools.guard((execution) => {
+          if (execution && execution.name === 'skill' && execution.arguments && typeof execution.arguments.name === 'string' && !allowed.has(execution.arguments.name)) {
+            return 'this role may only load skills: ' + list
+          }
+          return undefined
+        })
+      } catch {}
+    }
+  })
+
+  ctx.effect(() => () => pendingChildren.clear())
+
+  // Start one child under a reserved id so the role composition (and the
+  // host-level guard entry) exist before the child can run anything.
+  async function startChild(request, options, plan) {
+    if (typeof ctx.subagents.startActivation !== 'function') {
+      throw new Error('team_delegate requires DSH >= 0.2.1: ctx.subagents.startActivation is unavailable in this runtime')
+    }
+    const childId = randomUUID()
+    const pending = {
+      persona: plan.persona,
+      toolFilter: plan.toolFilter,
+      skills: plan.skills,
+      // Role-resolution warnings (unknown tool names, missing MCP servers) are
+      // reported together with anything the child-scope install reports.
+      warnings: Array.isArray(plan.warnings) ? [...plan.warnings] : [],
+      agent: undefined
+    }
+    pendingChildren.set(childId, pending)
+    announceRole(childId, options.roleName, options.rolePath)
+    try {
+      const activation = await ctx.subagents.startActivation({
+        provider: 'spawn',
+        label: options.label || options.roleName || 'subagent',
+        childId,
+        request,
+        signal: options.signal,
+        delivery: plan.delivery
+      })
+      // `agent/created` fires before startActivation resolves, so an entry still
+      // queued here means the child never announced itself.
+      if (pendingChildren.delete(childId)) pending.warnings.push('role composition was not applied: the child did not announce its creation')
+      return { activation, pending, childId: String(activation.childId ?? childId) }
+    } catch (error) {
+      pendingChildren.delete(childId)
+      unannounceRole(childId)
+      throw error
+    }
+  }
+
+  async function runForeground(request, options, plan) {
+    const { activation, pending } = await startChild(request, options, { ...plan, delivery: 'caller' })
     let result
     let dump = ''
     try {
-      // Hard skill enforcement (foreground only): install a guard on the child's
-      // own scope that denies `skill` calls for names outside the whitelist.
-      // Registered on the child's ctx, so it is disposed with the child's fiber.
-      if (skillAllow && skillAllow.length > 0 && run.localAgent && run.localAgent.ctx) {
-        try {
-          const childTools = run.localAgent.ctx.get('tools')
-          if (childTools && typeof childTools.guard === 'function') {
-            const allowed = new Set(skillAllow)
-            childTools.guard((execution) => {
-              if (execution && execution.name === 'skill' && execution.arguments && typeof execution.arguments.name === 'string' && !allowed.has(execution.arguments.name)) {
-                return 'this role may only load skills: ' + skillAllow.join(', ')
-              }
-              return undefined
-            })
-          }
-        } catch {}
+      result = await activation.result
+      dump = dumpChildEvents(pending.agent, 4000)
+    } catch (error) {
+      // A rejected result promise is an infrastructure-level failure (not a model
+      // stop reason). Normalize it so the caller's structured error path (and the
+      // auth-retry) still runs instead of throwing past it.
+      result = {
+        stopReason: 'error',
+        output: [{ type: 'text', text: 'subagent run rejected: ' + messageOf(error) }]
       }
-      try {
-        result = await run.result
-      } catch (error) {
-        // A rejected run promise is an infrastructure-level failure (not a model
-        // stop reason). Normalize it so the caller's structured error path (and
-        // the auth-retry above) still runs instead of throwing past it.
-        result = {
-          stopReason: 'error',
-          output: [{ type: 'text', text: 'subagent run rejected: ' + String(error && error.message ? error.message : error) }]
-        }
-      }
-      dump = dumpChildEvents(run.localAgent, 4000)
     } finally {
-      await run.dispose()
-      // Free the guard table entry for this one-shot child — it is gone now.
+      // Settled activations are already disposed by the runtime; calling dispose
+      // again is the documented idempotent stop for this exact activation.
       try {
-        const roleGuard = ctx.get('roleGuard')
-        if (roleGuard && typeof roleGuard.unregister === 'function') roleGuard.unregister(String(run.id))
+        await activation.dispose()
       } catch {}
+      unannounceRole(activation.childId ?? pending.agent?.id)
     }
-    return { result, dump, droppedFilter }
+    return { result, dump, warnings: pending.warnings }
+  }
+
+  async function runBackground(request, options, plan) {
+    const { pending, childId } = await startChild(request, options, { ...plan, delivery: 'parent' })
+    return { childId, warnings: pending.warnings }
   }
 
   const delegateTool = defineTool({
@@ -661,63 +780,44 @@ function apply(ctx, config) {
       const hasTemplate = body.includes('{{') || body.includes('}}')
       const agentOptions = resolveAgentOptions(role, parent)
       const controls = buildRoleControls(role, ctx, parent)
+      const label = args.description || args.subagent_type
+      // 0.2.1 has no request.persona / request.toolFilter: the role body becomes a
+      // child-scoped system-prompt section and the tool fields become a child-scoped
+      // registry restriction, both installed in `agent/created` (see startChild).
+      const plan = {
+        // A templated body is a prompt (it contains its own placeholders), so it is
+        // concatenated with the task instead of being installed as a persona.
+        persona: body && !hasTemplate ? body + controls.skillsPrompt : undefined,
+        toolFilter: controls.toolFilter,
+        skills: controls.skills,
+        warnings: controls.warnings
+      }
       const request = {
-        label: args.description || args.subagent_type,
-        prompt: hasTemplate ? [{ type: 'text', text: body + '\n\n--- 任务 ---\n\n' + task + controls.skillsPrompt }] : [{ type: 'text', text: task + controls.skillsPrompt }],
+        prompt: [{ type: 'text', text: hasTemplate ? body + '\n\n--- 任务 ---\n\n' + task + controls.skillsPrompt : task + controls.skillsPrompt }],
         parent,
         agentOptions
       }
-      if (body && !hasTemplate) request.persona = body + controls.skillsPrompt
-      if (controls.toolFilter) request.toolFilter = controls.toolFilter
+      const options = { roleName: args.subagent_type, rolePath: role.path, signal: exec.signal, label }
 
       if (args.run_in_background === false) {
-        let { result, dump, droppedFilter } = await runOne(request, exec.signal, controls.skills, args.subagent_type, role.path)
+        let run = await runForeground(request, options, plan)
         let routeUsed = agentOptions
         const pr = parentRoute(parent)
-        if (looksLikeAuth(result, dump) && pr && !sameRoute(pr, agentOptions)) {
+        if (looksLikeAuth(run.result, run.dump) && pr && !sameRoute(pr, agentOptions)) {
           const retry = Object.assign({}, request, { agentOptions: pr })
-          const r2 = await runOne(retry, exec.signal, controls.skills, args.subagent_type, role.path)
-          result = r2.result
-          dump = r2.dump
-          droppedFilter = r2.droppedFilter
+          run = await runForeground(retry, options, plan)
           routeUsed = pr
         }
-        const error = stopReasonError(result)
+        const error = stopReasonError(run.result)
         if (error) {
-          const partial = blockText(result.output)
-          return { kind: 'error', message: error + '\nroute: ' + routeUsed.provider + '/' + routeUsed.model + '\n--- child events ---\n' + (dump || partial), warnings: controls.warnings }
+          const partial = blockText(run.result.output)
+          return { kind: 'error', message: error + '\nroute: ' + routeUsed.provider + '/' + routeUsed.model + '\n--- child events ---\n' + (run.dump || partial), warnings: run.warnings }
         }
-        if (droppedFilter) controls.warnings.push('role tool whitelist was dropped: a listed tool is not in the child\'s tool view (platform/preset mismatch); role runs with full tool access')
-        return { kind: 'foreground', route: { provider: routeUsed.provider, model: routeUsed.model }, message: blockText(result.output), warnings: controls.warnings }
+        return { kind: 'foreground', route: { provider: routeUsed.provider, model: routeUsed.model }, message: blockText(run.result.output), warnings: run.warnings }
       }
 
-      let started
-      let droppedFilter = false
-      try {
-        started = await ctx.subagents.startContinuable({
-          provider: 'spawn',
-          label: args.description || args.subagent_type,
-          request,
-          signal: exec.signal
-        })
-      } catch (error) {
-        if (request.toolFilter && looksLikeRestrictError(error)) {
-          const withoutFilter = Object.assign({}, request)
-          delete withoutFilter.toolFilter
-          started = await ctx.subagents.startContinuable({
-            provider: 'spawn',
-            label: args.description || args.subagent_type,
-            request: withoutFilter,
-            signal: exec.signal
-          })
-          droppedFilter = true
-        } else {
-          throw error
-        }
-      }
-      announceRole(started.childId, args.subagent_type, role.path)
-      if (droppedFilter) controls.warnings.push('role tool whitelist was dropped: a listed tool is not in the child\'s tool view (platform/preset mismatch); role runs with full tool access')
-      return { kind: 'continuable', subagentId: String(started.childId), warnings: controls.warnings }
+      const background = await runBackground(request, options, plan)
+      return { kind: 'continuable', subagentId: background.childId, warnings: background.warnings }
     }
   })
 

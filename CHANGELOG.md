@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.3.0（team-delegate）/ 1.4.5（dsh-role-guard）— 适配 DSH 0.2.1 的 activation API
+
+### 宿主侧的破坏性变更（0.2.1-rc.1 起）
+
+- `ctx.subagents.start(provider, request)` 与 `ctx.subagents.startContinuable(spec)` **被移除**，统一为
+  `ctx.subagents.startActivation({ provider, label, childId?, request, signal, delivery })`，返回
+  `{ childId, messageId?, result, dispose }`。
+- `request.persona` / `request.toolFilter` **不再受支持**：官方明确「子代理的角色与工具组合由 Agent Preset 决定」，
+  委派工具本身若声明这两个字段会直接抛错。`delivery: 'parent'` 才向父代理发完成通知，`delivery: 'caller'`
+  只把结果回给调用方（阻塞等待场景）。
+- `agent-loop` 移除了 `cwd` 提示变量（`{{cwd}}`），工作目录改为由 `dsh-working-directory` 作为**必需运行时上下文**
+  （`Current working directory: "..."`）注入；任何仍写 `{{cwd}}` 的 persona/预设配置都会让每轮系统提示装配失败
+  （`unknown prompt variable "{{cwd}}" ... registered variables: provider, model`）。
+
+### team-delegate 1.3.0
+
+- **重写委派路径到 `startActivation`**：前台 `delivery: 'caller'` + `await activation.result` + `dispose()`；
+  后台 `delivery: 'parent'`，返回 childId，由运行时投递完成通知（不再自己持有 `localAgent`）。
+- **角色 persona 重新落地**：0.2.1 没有 `request.persona`，改为在子代理 `agent/created` 时把角色正文注册成
+  **子作用域**的 `systemPrompt` section（`team-delegate:role`，order 1，`interpolate: false`），位置紧跟部署
+  persona。section 由子代理自己的 fiber 持有，随子代理销毁，不会泄漏到其它会话。
+- **工具限制重新落地**：`tools` / `disallowedTools` / `mcp_servers` 改为在 `agent/created` 时对该子代理的
+  `tools` 注册表执行 `restrict()`；技能白名单仍用子作用域 `tools.guard()` 做调用期硬拒绝。
+- **消除注册竞态**：调用方自己 `randomUUID()` 预留 `childId` 再传给 `startActivation`，因此
+  `dsh-role-guard` 的权限表在子代理跑第一个工具之前就已登记（旧实现是启动后补登记）。
+- 角色正文里的 `{{...}}` 仍按旧语义走 prompt（不当作 persona 模板），persona section 设 `interpolate: false`，
+  避免角色文件里的花括号把子代理整轮装配打断。
+- `engines.dsh: ">=0.2.1-rc.1"`：新代码依赖 `startActivation`，由宿主兼容性闸门明确拒绝更旧运行时。
+
+### dsh-role-guard 1.4.5
+
+- 技能目录重写文案对齐 `dsh-tool-skill` 0.2.1 的实际框架（首轮目录新增 "If the user names a skill..." 与
+  "This catalog contains summaries only..." 两句），白名单子代理看到的目录与未过滤版保持同一措辞；
+  `source.entries` 仍完整保留以保证 digest 稳定（不重复注入）。
+- 核对 0.2.1 宿主契约无需其它改动：`agent/created`、`agent/disposed`、`tools/pre-execute`、
+  `agent/pre-step`（payload 仍由 `agentEvents.fused()` 注入 `agent`）、`source.kind = 'skill-catalog'`
+  均未变。
+
 ## 1.4.4
 
 ### 修复

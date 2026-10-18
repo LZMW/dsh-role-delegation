@@ -47,7 +47,12 @@ skills: [novel-punctuation-cleaner]
 你是资深网文校对润色师。职责：...
 ```
 
-`team-delegate` 会把这些字段翻译成子代理的 `toolFilter`（内部调用 `tools.restrict()`，注册表层硬执行——白名单外工具子代理调不到，会报 `UNKNOWN_TOOL`）和技能提示词。工具名会对照**主代理可见视图**校验存在性（含 preset 层工具；平台差异如 macOS 的 `Bash`→`bash` 自动适配）。若某个工具在子代理视图里实际不存在导致 `restrict()` 拒绝，委托会自动**去掉 toolFilter 重试**并提示告警，而不是整体失败。
+`team-delegate` 会把这些字段翻译成子代理的**工具限制**（在子代理创建时对其 `tools` 注册表调用 `restrict()`，注册表层硬执行——白名单外工具子代理调不到，会报 `UNKNOWN_TOOL`）和技能提示词。工具名会对照**主代理可见视图**校验存在性（含 preset 层工具；平台差异如 macOS 的 `Bash`→`bash` 自动适配）。若某个条目在子代理视图里实际不存在导致 `restrict()` 拒绝，插件会保留其余限制并把告警带回委托结果，而不是整体失败（`dsh-role-guard` 的调用期 deny 仍是第二道防线）。
+
+> DSH 0.2.1 起 `request.persona` / `request.toolFilter` 已被官方移除（角色与工具组合归 Agent Preset 管）。
+> 本插件 1.3.0 改为在子代理 `agent/created` 时，把角色正文注册为该子代理**子作用域**的 `systemPrompt` section、
+> 工具限制与技能白名单挂到该子代理**自己的** `tools` 注册表上——效果与 0.2.0 的 request 级注入一致，且不会影响
+> 其它会话。
 
 > 💡 **frontmatter 支持 YAML 块状列表和行内注释**（与 `dsh-role-guard` 相同的解析方言）：
 > ```yaml

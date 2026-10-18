@@ -25,6 +25,19 @@
 
 ---
 
+## 版本要求
+
+| DSH | team-delegate | dsh-role-guard | 说明 |
+|---|---|---|---|
+| **0.2.1-rc.1 及以上** | **1.3.0+** | 1.4.5+ | 用 `ctx.subagents.startActivation`；角色 persona / 工具限制在子代理 `agent/created` 时挂到子作用域 |
+| 0.2.0 及更早 | ≤ 1.2.1 | ≤ 1.4.4 | 旧实现依赖 `ctx.subagents.start` / `startContinuable` 与 `request.persona` / `request.toolFilter`，在 0.2.1 上会报 `ctx.subagents.start is not a function` |
+
+> 0.2.1 顺手修了一个高频坑：`{{cwd}}` 不再是提示变量（`cwd` 已由工作目录插件作为必需运行时上下文注入）。
+> 如果你在 persona / 预设里写过 `suffix: Your working directory is {{cwd}}.`，升级后请删掉，否则每轮都会
+> 因 `unknown prompt variable "{{cwd}}"` 直接失败。
+
+---
+
 ## 快速开始（3 步）
 
 ### 1. 安装两个包

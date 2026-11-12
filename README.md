@@ -36,6 +36,25 @@
 > 如果你在 persona / 预设里写过 `suffix: Your working directory is {{cwd}}.`，升级后请删掉，否则每轮都会
 > 因 `unknown prompt variable "{{cwd}}"` 直接失败。
 
+### DSH 0.2.2-rc.1 实测（2026-11-12）
+
+0.2.2 的破坏性变更集中在 `@deepseek-ai/dsh-tools` 与 `dsh-tool-subagent`，与本仓库两个插件相关的逐条结论：
+
+| 变更 | 对本仓库的影响 |
+|---|---|
+| `tools/execute` / `tools/pre-execute` waterfall、`deepFreeze` 从 `lib/index.js` 迁入新文件 **`lib/pipeline.js`** | **无影响**——role-guard 是 waterfall 的**监听者**，不 import 实现文件；语义不变 |
+| `dsh-tool-subagent` 的 Config **删除 `modelSelectionSettings`**，拆成 `modelSelection` + `modelDiscovery` | **无影响**——本仓库不读该配置键；但用户 profile 里的旧写法会静默失效，升级时需同步 |
+| `dsh-tool-subagent-control` **移除 `./list-agents` 子路径导出**，`list_agents` 并入主入口 `apply()` | **无影响**——本仓库不引用该子路径；但手抄 preset 里若有 `- id: tool-subagent-list-agents` 行会导致 preset `never started`（全部会话无法创建） |
+| `ctx.subagents.startActivation` / `agent/created` / `activation`+`subagentId` 返回形状 | **不变**（0.2.2 源 `tool-subagent` 仍 `return { kind: 'activation', subagentId: started.childId }`，`agent/created` ×5 不变） |
+
+**行为级实测**：
+
+- `team_delegate` 派发子代理成功（`hbl-blank-persona-carrier` 角色，后台模式，返回 closing message）；
+  `team_roles` 正常列出全部角色、`team_find` 匹配正常。
+- `dsh-role-guard` 拦截生效：受限角色（frontmatter 只允许 `Read/Glob/Grep/Write/Edit`）的子代理
+  报告「pwsh 不可用」，且其工具清单精确裁到 5 个白名单工具——证明 `agent/created` 上的
+  `restrict()` 与 skill 目录裁剪都在工作。
+
 ---
 
 ## 快速开始（3 步）

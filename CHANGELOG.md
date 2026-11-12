@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.0 / 1.4.5 — 已验证兼容 DSH 0.2.2-rc.1（2026-11-12，无代码变更）
+
+0.2.2 的破坏性变更集中在 `dsh-tools` 与 `dsh-tool-subagent`。两个插件都**不需要改代码**，
+但用户升级时会踩到两处**配置文件**陷阱（插件本身静默不受影响，所以更难察觉）：
+
+1. **`tools/execute` / `tools/pre-execute` 实现搬家**：从 `dsh-tools/lib/index.js`（1994 行）
+   迁入新的 `lib/pipeline.js`（772 行），`deepFreeze(exec.arguments)` 与
+   `dispatchScheduledExecution` 一并移动。**语义不变** —— `dsh-role-guard` 作为 waterfall 的
+   监听者不 import 实现文件，因此无影响。
+2. **`dsh-tool-subagent` 的 Config schema 改键**：`modelSelectionSettings` 被删除，拆成
+   `modelSelection` + `modelDiscovery`（旧键在 0.2.2 的 Config 里出现 0 次）。用户 profile 的
+   preset 覆盖里若仍写 `modelSelectionSettings: true`，不会报错、只是静默失效。
+3. **`dsh-tool-subagent-control` 移除 `./list-agents` 子路径导出**：`list_agents` /
+   `send_message` / `interrupt_agent` 改由主入口 `apply()` 内的 `registerListAgents()` 统一注册。
+   手抄 preset 里残留 `- id: tool-subagent-list-agents, name: '.../list-agents'` 会让该行
+   无 fiber → preset 审计报 `never started` → **所有会话无法创建**。
+
+**行为级实测**：`team_delegate` 派发成功（后台模式，返回 closing message），`team_roles` /
+`team_find` 正常；`dsh-role-guard` 拦截生效——受限角色（白名单只有 `Read/Glob/Grep/Write/Edit`）
+的子代理报告 pwsh 不可用，工具清单精确裁到 5 个。
+
 ## 1.3.0（team-delegate）/ 1.4.5（dsh-role-guard）— 适配 DSH 0.2.1 的 activation API
 
 ### 宿主侧的破坏性变更（0.2.1-rc.1 起）
